@@ -1,0 +1,13 @@
+version = 1
+
+# Files that cannot carry a comment header are declared here.
+
+[[annotations]]
+path = ".gitmodules"
+SPDX-FileCopyrightText = "2026 Kiwon Kwon"
+SPDX-License-Identifier = "Apache-2.0 WITH LLVM-exception"
+
+[[annotations]]
+path = "br2-external/configs/*_defconfig"
+SPDX-FileCopyrightText = "2026 Kiwon Kwon"
+SPDX-License-Identifier = "GPL-2.0-or-later"

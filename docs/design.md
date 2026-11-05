@@ -1,3 +1,6 @@
+<!-- SPDX-FileCopyrightText: 2026 Kiwon Kwon -->
+<!-- SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception -->
+
 # qemu-npu-soc 설계
 
 ---

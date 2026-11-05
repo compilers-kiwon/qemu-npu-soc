@@ -1,3 +1,6 @@
+<!-- SPDX-FileCopyrightText: 2026 Kiwon Kwon -->
+<!-- SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception -->
+
 # qemu-npu-soc 구현 계획
 
 이 문서는 `docs/design.md`의 설계를 어떤 순서로 구현할지 정한다. 단계마다

@@ -1,0 +1,12 @@
+# SPDX-FileCopyrightText: 2026 Kiwon Kwon
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+
+# Buildroot out-of-tree build and download directories
+/output/
+/dl/
+
+# Editor and patch leftovers
+*.orig
+*.rej
+*~
+*.pyc

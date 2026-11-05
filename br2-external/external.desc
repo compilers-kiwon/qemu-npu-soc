@@ -1,0 +1,4 @@
+# SPDX-FileCopyrightText: 2026 Kiwon Kwon
+# SPDX-License-Identifier: GPL-2.0-or-later
+name: KN1
+desc: kn1-evb board support

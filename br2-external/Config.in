@@ -1,0 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Kiwon Kwon
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+# Packages of the KN1 br2-external tree are sourced here, one line each:
+#   source "$BR2_EXTERNAL_KN1_PATH/package/<name>/Config.in"

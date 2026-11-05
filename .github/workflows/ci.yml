@@ -1,0 +1,46 @@
+# SPDX-FileCopyrightText: 2026 Kiwon Kwon
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+env:
+  BR_MAKE: make -C buildroot O=${{ github.workspace }}/output BR2_EXTERNAL=${{ github.workspace }}/br2-external
+
+jobs:
+  buildroot-config:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: true
+
+      - name: Install host dependencies of check-package
+        run: sudo apt-get install -y python3-magic python3-flake8
+
+      - name: Load kn1_evb_defconfig
+        run: $BR_MAKE kn1_evb_defconfig
+
+      - name: Check that the defconfig is minimal
+        run: |
+          $BR_MAKE savedefconfig
+          git diff --exit-code -- br2-external/configs/
+
+      - name: Run check-package on the br2-external tree
+        run: >
+          buildroot/utils/check-package -b
+          br2-external/configs/kn1_evb_defconfig
+          br2-external/external.mk
+          br2-external/Config.in
+
+  reuse-lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Check REUSE compliance
+        uses: fsfe/reuse-action@v6
