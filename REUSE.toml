@@ -11,3 +11,9 @@ SPDX-License-Identifier = "Apache-2.0 WITH LLVM-exception"
 path = "br2-external/configs/*_defconfig"
 SPDX-FileCopyrightText = "2026 Kiwon Kwon"
 SPDX-License-Identifier = "GPL-2.0-or-later"
+
+# Glue patches for upstream trees carry the upstream's license
+[[annotations]]
+path = "hw/qemu/patches/*.patch"
+SPDX-FileCopyrightText = "2026 Kiwon Kwon"
+SPDX-License-Identifier = "GPL-2.0-or-later"

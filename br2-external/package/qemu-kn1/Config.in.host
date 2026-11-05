@@ -1,0 +1,15 @@
+# SPDX-FileCopyrightText: 2026 Kiwon Kwon
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+config BR2_PACKAGE_HOST_QEMU_KN1
+	bool "host qemu-kn1"
+	depends on BR2_HOST_GCC_AT_LEAST_8
+	help
+	  QEMU 11.1.3 for the build host, with the kiwon-kn1 SoC and
+	  the kn1-evb machine added from hw/qemu/ of this repository.
+	  Only the aarch64 system emulator is built.
+
+	  https://www.qemu.org
+
+comment "host qemu-kn1 needs a host gcc >= 8"
+	depends on !BR2_HOST_GCC_AT_LEAST_8
