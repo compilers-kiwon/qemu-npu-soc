@@ -210,7 +210,7 @@ static void kiwon_kn1_realize(DeviceState *dev, Error **errp)
     sysbus_mmio_map(sbd, 0, kiwon_kn1_memmap[KN1_UART0].base);
     sysbus_connect_irq(sbd, 0, kiwon_kn1_spi(s, KN1_IRQ_UART0));
 
-    /* UART1: secure console, polled by the firmware, no interrupt */
+    /* UART1: secure console; the firmware polls it but the line exists */
     sbd = SYS_BUS_DEVICE(&s->uart[1]);
     qdev_prop_set_chr(DEVICE(sbd), "chardev", serial_hd(1));
     if (!sysbus_realize(sbd, errp)) {
@@ -219,6 +219,7 @@ static void kiwon_kn1_realize(DeviceState *dev, Error **errp)
     memory_region_add_subregion(&s->secure_sysmem,
                                 kiwon_kn1_memmap[KN1_UART1].base,
                                 sysbus_mmio_get_region(sbd, 0));
+    sysbus_connect_irq(sbd, 0, kiwon_kn1_spi(s, KN1_IRQ_UART1));
 
     /* RTC */
     sbd = SYS_BUS_DEVICE(&s->rtc);

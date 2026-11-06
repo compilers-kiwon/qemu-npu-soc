@@ -57,6 +57,7 @@ enum KiwonKn1Irq {
     KN1_IRQ_UART0 = 1,
     KN1_IRQ_RTC = 2,
     KN1_IRQ_PCIE_INTA = 3,      /* INTA..INTD: 3..6, reserved */
+    KN1_IRQ_UART1 = 8,          /* wired, but the firmware polls */
     KN1_IRQ_GWDT_WS0 = 10,
     KN1_IRQ_VIRTIO_MMIO = 16,   /* 16..19 */
     KN1_IRQ_NPU = 32,

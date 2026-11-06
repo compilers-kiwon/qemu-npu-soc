@@ -179,13 +179,14 @@ kn1이 QEMU `virt`와 공유하는 블록은 모두 `virt`의 주소에 있고, 
 |------|-----|-------|
 | UART0 | 1 | 33 |
 | RTC | 2 | 34 |
+| UART1(보안) | 8 | 40 |
 | PCIe INTA~INTD(예약) | 3~6 | 35~38 |
 | 워치독 WS0 | 10 | 42 |
 | virtio-mmio 0~3 | 16~19 | 48~51 |
 | kn1-npu | 32 | 64 |
 
 generic timer의 PPI는 아키텍처가 정한 INTID를 쓴다(보안 물리 29, 비보안 물리
-30, 가상 27, 하이퍼바이저 26). 보안 UART는 폴링한다. 보안 GPIO의 인터럽트는
+30, 가상 27, 하이퍼바이저 26). 보안 UART의 인터럽트는 SPI 8에 연결하지만 TF-A는 폴링한다(리눅스 `arm,pl011` 바인딩이 `interrupts`를 요구한다). 보안 GPIO의 인터럽트는
 연결하지 않는다. TF-A가 출력선만 쓰기 때문이다. `virt`에서는 인터럽트 표에
 이 GPIO의 항목이 없어서 SPI 0에 연결된다. 워치독의 두 번째 단계(WS1)는
 QEMU의 워치독 동작으로 머신을 리셋한다.
@@ -208,8 +209,9 @@ QEMU에 종료나 리셋을 요청한다(`hw/gpio/gpio_pwr.c`). `gpio-pwr`는 �
 - `linux/bindings/npu/kiwon,kn1-npu.yaml`: NPU 바인딩(8.5절).
 - U-Boot는 `kn1-evb.dts`로 자기 제어용 DT를 빌드한다(`OF_SEPARATE`.
   Buildroot가 `BR2_TARGET_UBOOT_CUSTOM_DTS_PATH`로 소스를 복사한다).
-- 리눅스 DTB는 Buildroot가 빌드해(`BR2_LINUX_KERNEL_CUSTOM_DTS_PATH`)
-  `/boot/kn1-evb.dtb`로 설치하고, U-Boot가 `extlinux.conf`의 `fdt` 줄로
+- 리눅스 DTB는 Buildroot가 빌드해(`BR2_LINUX_KERNEL_CUSTOM_DTS_DIR`로
+  `linux/dts/`를 커널의 `arch/arm64/boot/dts/`에 덮어씀. `_PATH` 변수는
+  커널 6.12부터 deprecated) `/boot/kn1-evb.dtb`로 설치하고, U-Boot가 `extlinux.conf`의 `fdt` 줄로
   리눅스에 넘긴다.
 - 펌웨어 없이 커널을 바로 띄우는 길(`-kernel`과 `-dtb`)은 빠른 시험용으로
   남긴다. 이때 QEMU가 DTB를 올리고 `/memory`와 `/chosen`을 고쳐 쓴다

@@ -1,0 +1,86 @@
+// SPDX-FileCopyrightText: 2026 Kiwon Kwon
+// SPDX-License-Identifier: GPL-2.0-or-later OR MIT
+/*
+ * Kiwon kn1-evb board: kn1 SoC, 4 GiB DRAM, 64 MiB secure boot flash,
+ * four virtio-mmio transports and a GPIO-driven power controller.
+ */
+
+/dts-v1/;
+
+#include <dt-bindings/gpio/gpio.h>
+#include "kn1.dtsi"
+
+/ {
+	model = "Kiwon kn1-evb";
+	compatible = "kiwon,kn1-evb", "kiwon,kn1";
+
+	aliases {
+		serial0 = &uart0;
+		serial1 = &uart1;
+	};
+
+	chosen {
+		stdout-path = "serial0:115200n8";
+	};
+
+	secure-chosen {
+		stdout-path = "serial1:115200n8";
+	};
+
+	memory@40000000 {
+		device_type = "memory";
+		reg = <0x0 0x40000000 0x1 0x00000000>;
+	};
+
+	/* Boot flash at the reset vector: BL1 and the FIP, secure world only */
+	flash@0 {
+		compatible = "cfi-flash";
+		reg = <0x0 0x00000000 0x0 0x04000000>;
+		bank-width = <4>;
+		status = "disabled";
+		secure-status = "okay";
+	};
+
+	virtio@a000000 {
+		compatible = "virtio,mmio";
+		reg = <0x0 0x0a000000 0x0 0x200>;
+		interrupts = <GIC_SPI 16 IRQ_TYPE_EDGE_RISING>;
+		dma-coherent;
+	};
+
+	virtio@a000200 {
+		compatible = "virtio,mmio";
+		reg = <0x0 0x0a000200 0x0 0x200>;
+		interrupts = <GIC_SPI 17 IRQ_TYPE_EDGE_RISING>;
+		dma-coherent;
+	};
+
+	virtio@a000400 {
+		compatible = "virtio,mmio";
+		reg = <0x0 0x0a000400 0x0 0x200>;
+		interrupts = <GIC_SPI 18 IRQ_TYPE_EDGE_RISING>;
+		dma-coherent;
+	};
+
+	virtio@a000600 {
+		compatible = "virtio,mmio";
+		reg = <0x0 0x0a000600 0x0 0x200>;
+		interrupts = <GIC_SPI 19 IRQ_TYPE_EDGE_RISING>;
+		dma-coherent;
+	};
+
+	/* Power controller driven by the secure GPIO lines (BL31 only) */
+	gpio-poweroff {
+		compatible = "gpio-poweroff";
+		gpios = <&gpio 0 GPIO_ACTIVE_HIGH>;
+		status = "disabled";
+		secure-status = "okay";
+	};
+
+	gpio-restart {
+		compatible = "gpio-restart";
+		gpios = <&gpio 1 GPIO_ACTIVE_HIGH>;
+		status = "disabled";
+		secure-status = "okay";
+	};
+};
