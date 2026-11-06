@@ -1,0 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Kiwon Kwon
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Also used by linux-headers (same tarball). From https://cdn.kernel.org/pub/linux/kernel/v7.x/sha256sums.asc
+# (signature of the kernel.org checksum autosigner verified)
+sha256  fa595aad93734f829c963c2a90ef7c3673224fd7fdae7b49406e397cde2de231  linux-7.3.1.tar.xz

@@ -20,7 +20,7 @@ jobs:
           submodules: true
 
       - name: Install host dependencies of check-package
-        run: sudo apt-get install -y python3-magic python3-flake8
+        run: sudo apt-get install -y python3-magic python3-flake8 shellcheck
 
       - name: Load kn1_evb_defconfig
         run: $BR_MAKE kn1_evb_defconfig
@@ -36,6 +36,9 @@ jobs:
           br2-external/configs/kn1_evb_defconfig
           br2-external/external.mk
           br2-external/Config.in
+          br2-external/package/*/*
+          br2-external/board/*/*
+          br2-external/patches/*/*.hash
 
   reuse-lint:
     runs-on: ubuntu-24.04

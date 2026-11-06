@@ -61,33 +61,38 @@ sudo apt-get install build-essential bc bzip2 cpio file git patch perl rsync unz
 git clone --recurse-submodules https://github.com/compilers-kiwon/qemu-npu-soc.git
 cd qemu-npu-soc
 make -C buildroot O="$PWD/output" BR2_EXTERNAL="$PWD/br2-external" kn1_evb_defconfig
-make -C buildroot O="$PWD/output" BR2_EXTERNAL="$PWD/br2-external" host-qemu-kn1
+make -C buildroot O="$PWD/output" BR2_EXTERNAL="$PWD/br2-external"
 ```
 
-두 번째 `make`는 QEMU 11.1.3을 받아 `hw/qemu/`의 kn1 SoC와 kn1-evb 머신을
-넣고 빌드해 `output/host/bin/qemu-system-aarch64`에 설치한다. 머신은 다음과
-같이 띄운다. 아직 부트 펌웨어와 커널이 없으므로 모니터에서 메모리 맵만 볼 수
-있다.
+두 번째 `make`가 툴체인, Linux 7.3.1(arm64 `defconfig`), 루트 파일 시스템,
+디바이스 트리, 그리고 kn1-evb 머신을 넣은 QEMU 11.1.3을 모두 빌드한다.
+결과물은 `output/images/`에 놓인다: `Image`, `kn1-evb.dtb`, `rootfs.ext4`,
+`start-qemu.sh`. QEMU 실행 파일은 `output/host/bin/qemu-system-aarch64`다.
+
+지금은 펌웨어 없이 QEMU가 커널과 DTB를 직접 올리는 방식으로 부팅한다.
 
 ```bash
-output/host/bin/qemu-system-aarch64 -M kn1-evb -nographic -monitor stdio -S
+output/images/start-qemu.sh
 ```
 
-```text
-(qemu) info mtree
-(qemu) quit
-```
+`root`로 로그인하면 셸이 뜬다. `poweroff`로 QEMU가 끝난다. TF-A와 U-Boot를
+거치는 부팅은 M1.2의 다음 층에서 더한다.
 
 WSL에서는 Windows 경로가 섞인 `PATH`를 Buildroot가 거부하므로, `make` 앞에
 `PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`을 붙인다.
 
-전체 빌드와 부팅 절차는 리눅스 셸까지 부팅하는 단계(M1.2)가 끝나면 채운다.
+디바이스 트리를 리눅스 바인딩 스키마로 검사하려면 호스트에 dt-schema(pip
+`dtschema`)를 두고 커널 빌드 디렉터리에서 다음을 돌린다.
+
+```bash
+make -C output/build/linux-7.3.1 ARCH=arm64 CROSS_COMPILE=aarch64-buildroot-linux-gnu- CHECK_DTBS=y kiwon/kn1-evb.dtb
+```
 
 ## 현재 상태
 
 | 마일스톤 | 목표 | 상태 |
 |----------|------|------|
-| M1 | 합성곱 하나를 모든 층에 관통시킨다 | 진행 중. M1.1 저장소 뼈대, M1.2의 QEMU 머신 `kn1-evb`까지 끝났다 |
+| M1 | 합성곱 하나를 모든 층에 관통시킨다 | 진행 중. M1.1 저장소 뼈대, M1.2의 QEMU 머신·디바이스 트리·커널 직접 부팅까지 끝났다 |
 | M2 | MNIST CNN | 시작 전 |
 | M3 | MLPerf Tiny ResNet-8 | 시작 전 |
 | M4 | 마무리: 새로 받은 저장소에서 README만으로 빌드와 데모 | 시작 전 |
