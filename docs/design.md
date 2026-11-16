@@ -420,6 +420,18 @@ DRAM 범위는 장치가 아니라 커널 검증기가 지킨다(8.4절, D30).
   `plat_helpers.mk`가 이것을 도구를 직접 빌드할 때 쓰는 변수로 설명하기
   때문이다.
 
+- 부트 플래시 배치는 `plat/qemu`와 같다: BL1은 0번지(리셋 벡터)에, FIP는
+  256 KiB 오프셋에 둔다. U-Boot(BL33)는 DRAM 시작에서 512 MiB 떨어진
+  곳(`0x6000_0000`)에 올린다.
+- TF-A의 부트·런타임·크래시 콘솔은 보안 UART1이다. `start-qemu.sh`는
+  UART0과 UART1을 QEMU의 chardev mux로 한 터미널에 묶는다.
+- Cortex-A72는 CCI 뒤에 있는 Armv8.0-A 코어라 `HW_ASSISTED_COHERENCY=0`,
+  `USE_COHERENT_MEM=1`로 빌드한다(Arm FVP의 A72 설정과 같다. `plat/qemu`는
+  반대로 1과 0을 쓴다).
+- BL2는 디바이스 트리를 고치지 않는다. kn1의 DT는 정적이고 PSCI 노드와
+  `enable-method`가 이미 들어 있다(`plat/qemu`는 QEMU가 만든 DT에 PSCI
+  노드를 더한다).
+
 ### 7.2 U-Boot
 
 - 보드 `kiwon/kn1-evb`. Kconfig 연결 패치로 등록한다(`arch/arm/Kconfig`가

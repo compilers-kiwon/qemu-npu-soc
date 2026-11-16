@@ -1,0 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Kiwon Kwon
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Locally computed from the reproducible tarball Buildroot makes of tag
+# v2026.10 (commit 5508406) of https://source.denx.de/u-boot/u-boot.git
+sha256  3e6a271144fb707a4da1b9741df7ce767eda7c57659f2eb1b7b542e3c742c3a2  uboot-v2026.10-git4.tar.gz

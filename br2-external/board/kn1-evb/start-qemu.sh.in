@@ -2,8 +2,12 @@
 # SPDX-FileCopyrightText: 2026 Kiwon Kwon
 # SPDX-License-Identifier: GPL-2.0-or-later
 #
-# Boot kn1-evb without firmware: the kernel and the DTB are loaded by
-# QEMU and the root file system is the ext4 image on a virtio disk.
+# Boot kn1-evb through the firmware chain. BL1 and the FIP (BL2, BL31,
+# U-Boot) come from the boot flash image, QEMU places the DTB at the start
+# of DRAM for U-Boot, and the root file system is the ext4 image on a
+# virtio disk. UART0 (U-Boot and Linux console) and UART1 (TF-A) share
+# the terminal: Ctrl-a c switches the keyboard between them, Ctrl-a x
+# quits QEMU.
 # Generated into the images directory by post-image.sh.
 
 IMAGES_DIR="${0%/*}"
@@ -11,9 +15,10 @@ cd "${IMAGES_DIR}" || exit 1
 
 export PATH="@HOST_DIR@/bin:${PATH}"
 
-exec qemu-system-aarch64 -M kn1-evb -nographic \
-    -kernel Image -dtb kn1-evb.dtb \
-    -append "rootwait root=/dev/vda console=ttyAMA0" \
+exec qemu-system-aarch64 -M kn1-evb -display none \
+    -chardev stdio,id=con,mux=on,signal=off \
+    -serial chardev:con -serial chardev:con \
+    -bios flash.bin -dtb kn1-evb.dtb \
     -drive file=rootfs.ext4,if=none,format=raw,id=hd0 \
     -device virtio-blk-device,drive=hd0 \
     "$@"

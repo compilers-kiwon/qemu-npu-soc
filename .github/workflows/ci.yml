@@ -37,6 +37,7 @@ jobs:
           br2-external/external.mk
           br2-external/Config.in
           br2-external/package/*/*
+          br2-external/boot/*/*
           br2-external/board/*/*
           br2-external/patches/*/*.hash
 
