@@ -1,9 +1,0 @@
-# SPDX-FileCopyrightText: 2026 Kiwon Kwon
-# SPDX-License-Identifier: GPL-2.0-or-later
-#
-# Changes on top of the upstream qemu_arm64_defconfig that stands in as
-# BL33 until the kn1-evb board port exists. The QEMU virt machine keeps
-# the U-Boot environment in its second flash at 0x04000000; kn1 has no
-# device there and the access would abort.
-# CONFIG_ENV_IS_IN_FLASH is not set
-CONFIG_ENV_IS_NOWHERE=y

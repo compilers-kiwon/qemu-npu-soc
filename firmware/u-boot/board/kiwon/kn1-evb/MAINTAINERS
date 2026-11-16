@@ -1,0 +1,5 @@
+KIWON KN1-EVB BOARD
+M:	Kiwon Kwon <compilers@naver.com>
+S:	Maintained
+F:	board/kiwon/kn1-evb/
+F:	configs/kn1-evb_defconfig

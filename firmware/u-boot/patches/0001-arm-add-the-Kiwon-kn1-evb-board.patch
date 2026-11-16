@@ -1,0 +1,45 @@
+From 56cc31889b6513d49427af7d7a6e57c4f187f041 Mon Sep 17 00:00:00 2001
+From: Kiwon Kwon <compilers@naver.com>
+Date: Mon, 16 Nov 2026 12:00:00 +0900
+Subject: [PATCH] arm: add the Kiwon kn1-evb board
+
+Add the Kconfig target entry for the kn1-evb board and source its board
+Kconfig. The board directory (board/kiwon/kn1-evb) and the defconfig
+(configs/kn1-evb_defconfig) are copied into the tree by the build.
+
+Signed-off-by: Kiwon Kwon <compilers@naver.com>
+---
+ arch/arm/Kconfig | 13 +++++++++++++
+ 1 file changed, 13 insertions(+)
+
+diff --git a/arch/arm/Kconfig b/arch/arm/Kconfig
+index 1b474a34..883592fe 100644
+--- a/arch/arm/Kconfig
++++ b/arch/arm/Kconfig
+@@ -2203,6 +2203,18 @@ config TARGET_XENGUEST_ARM64
+ 	select XEN_SERIAL
+ 	imply OF_HAS_PRIOR_STAGE
+ 
++config TARGET_KN1_EVB
++	bool "Kiwon kn1-evb board"
++	select ARM64
++	select DM
++	select DM_SERIAL
++	select OF_CONTROL
++	select PL01X_SERIAL
++	help
++	  Support for the kn1-evb board, a QEMU machine built around the
++	  kn1 SoC (4x Cortex-A72, GICv3, PL011, virtio-mmio). U-Boot runs
++	  as the TF-A BL33 and boots Linux from a virtio disk.
++
+ config ARCH_GXP
+ 	bool "Support HPE GXP SoCs"
+ 	select DM
+@@ -2474,6 +2486,7 @@ source "board/phytium/durian/Kconfig"
+ source "board/phytium/pomelo/Kconfig"
+ source "board/phytium/pe2201/Kconfig"
+ source "board/xen/xenguest_arm64/Kconfig"
++source "board/kiwon/kn1-evb/Kconfig"
+ 
+ source "arch/arm/Kconfig.debug"
+ 

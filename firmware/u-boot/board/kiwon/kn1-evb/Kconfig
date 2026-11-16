@@ -1,0 +1,12 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# SPDX-FileCopyrightText: 2026 Kiwon Kwon
+
+if TARGET_KN1_EVB
+
+config SYS_BOARD
+	default "kn1-evb"
+
+config SYS_VENDOR
+	default "kiwon"
+
+endif

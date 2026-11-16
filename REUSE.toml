@@ -17,3 +17,12 @@ SPDX-License-Identifier = "GPL-2.0-or-later"
 path = "hw/qemu/patches/*.patch"
 SPDX-FileCopyrightText = "2026 Kiwon Kwon"
 SPDX-License-Identifier = "GPL-2.0-or-later"
+
+[[annotations]]
+path = [
+    "firmware/u-boot/board/kiwon/kn1-evb/MAINTAINERS",
+    "firmware/u-boot/configs/*_defconfig",
+    "firmware/u-boot/patches/*.patch",
+]
+SPDX-FileCopyrightText = "2026 Kiwon Kwon"
+SPDX-License-Identifier = "GPL-2.0-or-later"

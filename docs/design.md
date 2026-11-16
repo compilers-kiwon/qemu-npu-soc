@@ -440,12 +440,29 @@ DRAM 범위는 장치가 아니라 커널 검증기가 지킨다(8.4절, D30).
   `OF_SEPARATE`, D4). 보드는 DRAM 크기를 이 DT에서 읽는다.
 - 부트 디스크의 `extlinux.conf`로 표준 부팅을 한다. 그 `fdt` 줄이 리눅스용
   `/boot/kn1-evb.dtb`를 올린다(`boot/pxe_utils.c`의 scenario 1).
+- 소스는 `firmware/u-boot/`에 두고, Buildroot가 U-Boot 트리를 푼 뒤 보드
+  디렉터리와 `kn1-evb_defconfig`를 복사하고 연결 패치를 적용한다. DT
+  Makefile은 고치지 않는다. `scripts/Makefile.dts`가
+  `CONFIG_DEFAULT_DEVICE_TREE`를 빌드 목록에 넣기 때문이다. 보드 헤더
+  (`include/configs/`)도 두지 않는다. `CFG_SYS_SDRAM_BASE`가 없으면 U-Boot는
+  DT에서 읽은 첫 DRAM 뱅크를 쓴다.
+- DRAM은 `fdtdec_setup_mem_size_base_lowest()`로 읽는다.
+  `fdtdec_setup_mem_size_base()`는 `/memory` 경로로 찾은 첫 노드를 상태와
+  상관없이 읽는데, kn1 DT에서는 꺼져 있는 보안 RAM 노드가 먼저 나온다.
+- TF-A가 BL33을 올리는 `0x6000_0000`에 링크하고(`TEXT_BASE`), 그 아래를
+  재배치 전 스택으로 쓴다.
+- kn1에 있는 장치에 필요한 기능만 켠다: PL011, virtio-mmio 블록 장치, GPT와
+  ext4, bootstd의 extlinux, PSCI 리셋과 끄기. arm64의 기본값인 UEFI 로더는
+  그대로 둔다.
 
 ### 7.3 저장 장치와 루트 파일 시스템
 
-virtio-mmio 블록 장치에 ext4 이미지를 두고, 그 안에 `/boot/Image`,
-`/boot/kn1-evb.dtb`, `extlinux.conf`, Buildroot 루트 파일 시스템을 담는다
-(D27). 나중에 실제 SoC 저장 장치 컨트롤러로 바꾼다(13절). 후보 중 하나인
+virtio-mmio 블록 장치에 GPT 디스크 이미지(`disk.img`)를 두고, 그 유일한
+ext4 파티션에 `/boot/Image`, `/boot/kn1-evb.dtb`, `extlinux.conf`, Buildroot
+루트 파일 시스템을 담는다(D27). U-Boot 표준 부팅의 extlinux 방식은 파티션
+테이블이 있는 디스크만 읽으므로(`boot/bootmeth_extlinux.c`), 파티션이 없는
+ext4 이미지를 그대로 쓰지 않고 Buildroot의 genimage로 GPT 디스크를 만든다.
+나중에 실제 SoC 저장 장치 컨트롤러로 바꾼다(13절). 후보 중 하나인
 QEMU의 PL181 모델에는 DMA가 없고, QEMU의 SD 카드 모델은 2 GiB 이하 이미지의
 크기가 2의 거듭제곱이어야 한다(`hw/sd/sd.c`).
 

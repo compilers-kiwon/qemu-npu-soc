@@ -68,8 +68,9 @@ make -C buildroot O="$PWD/output" BR2_EXTERNAL="$PWD/br2-external"
 Linux 7.3.1(arm64 `defconfig`), 루트 파일 시스템, 디바이스 트리, 그리고
 kn1-evb 머신을 넣은 QEMU 11.1.3을 모두 빌드한다. 결과물은 `output/images/`에
 놓인다: `bl1.bin`과 `fip.bin`(BL2, BL31, U-Boot)을 합친 부트 플래시 이미지
-`flash.bin`, `Image`, `kn1-evb.dtb`, `rootfs.ext4`(`/boot/Image`와
-`/boot/kn1-evb.dtb` 포함), `start-qemu.sh`. QEMU 실행 파일은
+`flash.bin`, 루트 파일 시스템 `rootfs.ext4`(`/boot/Image`,
+`/boot/kn1-evb.dtb`, `/boot/extlinux/extlinux.conf` 포함)를 GPT 파티션 하나에
+담은 부트 디스크 `disk.img`, `start-qemu.sh`. QEMU 실행 파일은
 `output/host/bin/qemu-system-aarch64`다.
 
 ```bash
@@ -77,28 +78,19 @@ output/images/start-qemu.sh
 ```
 
 리셋 벡터의 BL1이 플래시의 FIP에서 BL2와 BL31을 올리고, BL31이 PSCI를 맡은
-채 U-Boot로 넘어간다. 터미널에는 TF-A 콘솔(보안 UART1)과 U-Boot·리눅스
+채 U-Boot로 넘어간다. U-Boot(보드 `kiwon/kn1-evb`)는 자기 디바이스 트리로
+동작하고, 디스크의 `extlinux.conf`를 읽어 커널과 `kn1-evb.dtb`를 올린다.
+터미널에는 TF-A 콘솔(보안 UART1)과 U-Boot·리눅스
 콘솔(UART0)이 함께 나온다. 키보드는 UART0에 연결돼 있고, Ctrl-a c로
 바꾸며, Ctrl-a x로 QEMU를 끝낸다.
-
-지금의 U-Boot는 업스트림 `qemu_arm64_defconfig`를 임시로 쓴다(환경 변수를
-플래시에서 읽지 않는 조각만 더했다). kn1-evb 보드 포트와 `extlinux.conf`
-부팅은 M1.2의 다음 층에서 더하므로, 그때까지는 U-Boot 프롬프트에서 커널을
-직접 올린다.
-
-```
-=> virtio scan
-=> load virtio 0 ${kernel_addr_r} /boot/Image
-=> load virtio 0 0x48000000 /boot/kn1-evb.dtb
-=> setenv bootargs root=/dev/vda rootwait console=ttyAMA0
-=> booti ${kernel_addr_r} - 0x48000000
-```
 
 `root`로 로그인하면 셸이 뜬다. `poweroff`와 `reboot`는 PSCI를 거쳐 BL31이
 보안 GPIO로 처리하며, 각각 QEMU 종료와 BL1부터의 재부팅으로 이어진다.
 
-TF-A 포트(`firmware/tf-a/`)를 고친 뒤에는 Buildroot가 TF-A 트리를 다시 풀어
-복사하도록 `make … arm-trusted-firmware-dirclean`을 먼저 돌린다.
+TF-A 포트(`firmware/tf-a/`)나 U-Boot 보드 포트(`firmware/u-boot/`)를 고친
+뒤에는 Buildroot가 소스 트리를 다시 풀어 복사하도록 `make …
+arm-trusted-firmware-dirclean`이나 `make … uboot-dirclean`을 먼저 돌린다.
+U-Boot는 FIP 안에 들어가므로, U-Boot를 고쳤을 때도 TF-A를 다시 빌드한다.
 
 WSL에서는 Windows 경로가 섞인 `PATH`를 Buildroot가 거부하므로, `make` 앞에
 `PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`을 붙인다.
@@ -114,7 +106,7 @@ make -C output/build/linux-7.3.1 ARCH=arm64 CROSS_COMPILE=aarch64-buildroot-linu
 
 | 마일스톤 | 목표 | 상태 |
 |----------|------|------|
-| M1 | 합성곱 하나를 모든 층에 관통시킨다 | 진행 중. M1.1 저장소 뼈대, M1.2의 QEMU 머신·디바이스 트리·커널 직접 부팅·TF-A까지 끝났다 |
+| M1 | 합성곱 하나를 모든 층에 관통시킨다 | 진행 중. M1.1 저장소 뼈대, M1.2 펌웨어 체인 부팅(QEMU 머신, 디바이스 트리, TF-A, U-Boot, 리눅스 셸)까지 끝났다 |
 | M2 | MNIST CNN | 시작 전 |
 | M3 | MLPerf Tiny ResNet-8 | 시작 전 |
 | M4 | 마무리: 새로 받은 저장소에서 README만으로 빌드와 데모 | 시작 전 |
