@@ -1,0 +1,95 @@
+# SPDX-FileCopyrightText: 2026 Kiwon Kwon
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+
+# Full Buildroot build and boot smoke test (docs/design.md D42). Runs every
+# night and on demand; the per-push checks are in ci.yml.
+
+name: Nightly
+
+on:
+  schedule:
+    - cron: '0 17 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  BR_MAKE: make -C buildroot O=${{ github.workspace }}/output BR2_EXTERNAL=${{ github.workspace }}/br2-external
+
+jobs:
+  full-build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    steps:
+      # The runner's SSD is listed at 14 GB and a full build needs about
+      # 20 GB (output/ and the download directory), so drop large
+      # preinstalled toolchains we do not use.
+      - name: Free disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/.ghcup /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          sudo docker image prune --all --force > /dev/null
+          df -h /
+
+      - uses: actions/checkout@v7
+        with:
+          submodules: true
+
+      - name: Install Buildroot host dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential bc cpio file rsync unzip wget
+
+      # Only the downloads are cached; every run builds from scratch.
+      - name: Compute the download cache key
+        id: dl-key
+        run: echo "buildroot=$(git rev-parse HEAD:buildroot)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the download directory
+        uses: actions/cache@v6
+        with:
+          path: buildroot/dl
+          key: buildroot-dl-${{ steps.dl-key.outputs.buildroot }}-${{ hashFiles('br2-external/configs/kn1_evb_defconfig', 'br2-external/patches/*/*.hash', 'br2-external/package/*/*.hash') }}
+          restore-keys: |
+            buildroot-dl-${{ steps.dl-key.outputs.buildroot }}-
+            buildroot-dl-
+
+      - name: Load kn1_evb_defconfig
+        run: $BR_MAKE kn1_evb_defconfig
+
+      # The full log goes to a file; only Buildroot's per-step lines are shown.
+      - name: Build
+        run: $BR_MAKE 2>&1 | tee build.log | grep --line-buffered '^>>>'
+
+      - name: Boot smoke test
+        run: >
+          python3 tests/boot/kn1_boot_test.py
+          --images output/images
+          --host-bin output/host/bin
+          --log-dir output/test-logs
+
+      - name: Keep the end of the build log
+        if: failure()
+        run: tail -n 500 build.log > build-tail.log || true
+
+      - name: Show disk usage
+        if: always()
+        run: |
+          df -h /
+          du -sh output buildroot/dl 2>/dev/null || true
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: nightly-logs
+          path: |
+            output/test-logs/
+            build-tail.log
+          if-no-files-found: ignore

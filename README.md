@@ -87,6 +87,18 @@ output/images/start-qemu.sh
 `root`로 로그인하면 셸이 뜬다. `poweroff`와 `reboot`는 PSCI를 거쳐 BL31이
 보안 GPIO로 처리하며, 각각 QEMU 종료와 BL1부터의 재부팅으로 이어진다.
 
+빌드한 이미지로 부팅 시험을 돌리면, 사람 손 없이 펌웨어 체인 전체로 부팅해
+CPU 4개, DRAM 4 GiB, RTC, 워치독, `reboot`, `poweroff`, 4 GiB가 아닌 `-m`
+거부를 확인한다. 콘솔 로그는 `output/test-logs/`에 남는다.
+
+```bash
+python3 tests/boot/kn1_boot_test.py
+```
+
+GitHub Actions에서는 push마다 defconfig, `check-package`, `reuse lint`를
+검사하고(`ci.yml`), 매일 밤과 수동 실행 때 전체 빌드와 이 부팅 시험을
+돌린다(`nightly.yml`).
+
 TF-A 포트(`firmware/tf-a/`)나 U-Boot 보드 포트(`firmware/u-boot/`)를 고친
 뒤에는 Buildroot가 소스 트리를 다시 풀어 복사하도록 `make …
 arm-trusted-firmware-dirclean`이나 `make … uboot-dirclean`을 먼저 돌린다.

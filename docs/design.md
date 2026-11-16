@@ -614,6 +614,8 @@ CPU 후처리 연산.
 
 CI(D42, GitHub Actions): push마다 V2~V4를 돌리고, 매일 밤과 수동 실행 때
 Buildroot 전체 빌드와 V1, V5, V6을 돌린다.
+V1, V5, V6이 생기기 전까지 야간 작업은 전체 빌드와 부팅 스모크
+시험(`tests/boot/`, M1.2 완료 조건)을 돌린다.
 
 ---
 
