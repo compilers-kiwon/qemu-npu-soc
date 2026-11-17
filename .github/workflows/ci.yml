@@ -41,6 +41,22 @@ jobs:
           br2-external/board/*/*
           br2-external/patches/*/*.hash
 
+  # V2 and V3 (docs/design.md 11): the shared NPU core against the pinned
+  # TFLite Micro reference kernels, and its error and wait rules
+  npu-core:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Configure (downloads the pinned TFLite Micro files)
+        run: cmake -S tests/npu-core -B build/npu-core
+
+      - name: Build
+        run: cmake --build build/npu-core --parallel
+
+      - name: Run V2 and V3
+        run: ctest --test-dir build/npu-core --output-on-failure
+
   reuse-lint:
     runs-on: ubuntu-24.04
     steps:

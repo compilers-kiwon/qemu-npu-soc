@@ -95,10 +95,6 @@ CPU 4개, DRAM 4 GiB, RTC, 워치독, `reboot`, `poweroff`, 4 GiB가 아닌 `-m`
 python3 tests/boot/kn1_boot_test.py
 ```
 
-GitHub Actions에서는 push마다 defconfig, `check-package`, `reuse lint`를
-검사하고(`ci.yml`), 매일 밤과 수동 실행 때 전체 빌드와 이 부팅 시험을
-돌린다(`nightly.yml`).
-
 TF-A 포트(`firmware/tf-a/`)나 U-Boot 보드 포트(`firmware/u-boot/`)를 고친
 뒤에는 Buildroot가 소스 트리를 다시 풀어 복사하도록 `make …
 arm-trusted-firmware-dirclean`이나 `make … uboot-dirclean`을 먼저 돌린다.
@@ -114,11 +110,40 @@ WSL에서는 Windows 경로가 섞인 `PATH`를 Buildroot가 거부하므로, `m
 make -C output/build/linux-7.3.1 ARCH=arm64 CROSS_COMPILE=aarch64-buildroot-linux-gnu- CHECK_DTBS=y kiwon/kn1-evb.dtb
 ```
 
+## NPU 공유 코어 시험
+
+`hw/npu-core/`는 [NPU 명세](docs/npu-spec.md)대로 명령열을 실행하는 공유
+코어이고, 나중에 QEMU 장치와 호스트 도구가 함께 쓴다. 지금은 합성곱(`OP_CONV`),
+DMA, 대기 명령과 그에 필요한 SET 명령을 구현했다. `OP_ADD`와 `OP_AVGPOOL`은
+아직 `UNKNOWN_CMD`로 멈춘다.
+
+호스트 시험에는 CMake, C/C++ 컴파일러, Python 3가 필요하다. 구성 단계에서
+고정한 커밋의 TensorFlow Lite Micro 파일 9개를 내려받아 SHA-256을 검사한다.
+
+```bash
+cmake -S tests/npu-core -B build/npu-core
+cmake --build build/npu-core
+ctest --test-dir build/npu-core --output-on-failure
+```
+
+- V2: TFLite Micro 참조 합성곱을 이중·단일 반올림으로 한 번씩 빌드해
+  정답값을 만든다(`tflm_golden_double`, `tflm_golden_single`).
+- V3: 어셈블러(`knpu_asm.py`)로 만든 명령열을 공유 코어(`knpu_run`)에서 실행해
+  정답값과 바이트 단위로 비교한다. 1x1·3x3 커널, stride 1·2, VALID·SAME
+  패딩, 두 반올림 방식, 채널별 재양자화, 2-D DMA를 다룬다. 명세의 오류
+  코드와 `ERR_OFFSET`, 대기 누락이 내는 동기화 오류, 암묵 대기도 확인한다.
+
+## CI
+
+GitHub Actions에서는 push마다 defconfig, `check-package`, `reuse lint`,
+NPU 공유 코어 시험(V2, V3)을 돌리고(`ci.yml`), 매일 밤과 수동 실행 때 전체
+빌드와 부팅 시험을 돌린다(`nightly.yml`).
+
 ## 현재 상태
 
 | 마일스톤 | 목표 | 상태 |
 |----------|------|------|
-| M1 | 합성곱 하나를 모든 층에 관통시킨다 | 진행 중. M1.1 저장소 뼈대, M1.2 펌웨어 체인 부팅(QEMU 머신, 디바이스 트리, TF-A, U-Boot, 리눅스 셸), M1.3 NPU 명세 v0([docs/npu-spec.md](docs/npu-spec.md))까지 끝났다 |
+| M1 | 합성곱 하나를 모든 층에 관통시킨다 | 진행 중. M1.1 저장소 뼈대, M1.2 펌웨어 체인 부팅(QEMU 머신, 디바이스 트리, TF-A, U-Boot, 리눅스 셸), M1.3 NPU 명세 v0([docs/npu-spec.md](docs/npu-spec.md)), M1.4 NPU 공유 코어와 정답값 비교(V2, V3)까지 끝났다 |
 | M2 | MNIST CNN | 시작 전 |
 | M3 | MLPerf Tiny ResNet-8 | 시작 전 |
 | M4 | 마무리: 새로 받은 저장소에서 README만으로 빌드와 데모 | 시작 전 |

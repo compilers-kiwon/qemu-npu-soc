@@ -5,6 +5,9 @@
 /output/
 /dl/
 
+# Host builds (tests/npu-core and later CMake projects)
+/build/
+
 # Editor and patch leftovers
 *.orig
 *.rej
