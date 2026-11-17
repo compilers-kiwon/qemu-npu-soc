@@ -246,7 +246,8 @@ QEMU에 종료나 리셋을 요청한다(`hw/gpio/gpio_pwr.c`). `gpio-pwr`는 �
 ### 6.2 레지스터
 
 레지스터는 모두 32비트이고, 64비트 값은 `_LO`/`_HI`로 나눈다. 아래 표는
-합의한 윤곽이며, 비트 단위 정의는 첫 마일스톤에서 `docs/npu-spec.md`에 쓴다.
+윤곽이고, 비트 단위 정의(필드, 리셋 값, 접근 규칙)는
+[npu-spec.md](npu-spec.md)에 있다.
 
 | 오프셋 | 이름 | 접근 | 내용 |
 |--------|------|------|------|
@@ -296,12 +297,12 @@ QEMU에 종료나 리셋을 요청한다(`hw/gpio/gpio_pwr.c`). `gpio-pwr`는 �
 | 동기화 | `OP_DMA_WAIT`, `OP_KERNEL_WAIT`(파라미터: 남아 있어도 되는 작업 수, Ethos-U와 같음) |
 | 피처맵 | `SET_IFM_BASE`, `SET_IFM_SHAPE`(H, W, C), `SET_IFM_ZP`, `SET_IFM2_BASE`, `SET_IFM2_ZP`, `SET_OFM_BASE`, `SET_OFM_SHAPE`, `SET_OFM_ZP` |
 | 커널 | `SET_WEIGHT_BASE`, `SET_BIAS_BASE`, `SET_KERNEL`(kh, kw), `SET_STRIDE`, `SET_PAD`(위, 왼쪽, 아래, 오른쪽) |
-| 재양자화 | `SET_RQ_TABLE`(SRAM에 있는 채널별 곱셈 계수와 시프트), `SET_ADD_SCALES`, `SET_CLAMP`(최소, 최대), `SET_ROUND_MODE`(이중, 단일) |
+| 재양자화 | `SET_RQ_TABLE`(SRAM에 있는 채널별 곱셈 계수와 시프트), `SET_IFM_SCALE` / `SET_IFM2_SCALE` / `SET_OFM_SCALE`(ADD의 입력과 출력 곱셈 계수, 시프트), `SET_CLAMP`(최소, 최대), `SET_ROUND_MODE`(이중, 단일) |
 | 연산 | `OP_CONV`, `OP_ADD`, `OP_AVGPOOL`(비동기) |
 
 연산 명령의 `*_BASE` 값은 모두 SRAM 오프셋이다(D10). 비트 단위
-인코딩(명령 번호, 필드 위치, 대기 의미, 오류 코드)은 첫 마일스톤에서
-`docs/npu-spec.md`에 쓰고 따로 검토를 받는다.
+인코딩(명령 번호, 필드 위치, 대기 의미, 오류 코드)은
+[npu-spec.md](npu-spec.md)에 있다.
 
 ### 6.4 연산 의미
 
@@ -689,13 +690,14 @@ TFLite `schema.fbs`(Apache-2.0).
 ## 13. 열린 항목
 
 1. virtio-mmio를 대신할 실제 저장 장치 컨트롤러(D27).
-2. 비트 단위 NPU 명세(`docs/npu-spec.md`): 명령 번호, 필드 배치, 대기 의미,
-   오류 코드. 첫 마일스톤에서 쓰고 따로 검토를 받는다.
+2. 확정됨(2026-11-17): 비트 단위 NPU 명세 `docs/npu-spec.md` v0. 명령 번호,
+   필드 배치, 대기 의미, 오류 코드를 정했다.
 3. 확인됨(2026-11-06): 리눅스 v7.3.1의 `dtbs_check`는 등록되지 않은 벤더
    접두사 `kiwon`을 오류로 보지 않는다. 루트 노드 compatible에 대한 "스키마
    없음" 경고만 남으며, 보드 바인딩 YAML을 둘지는 열어 둔다(5.5절).
-4. 미확인: 1x1 합성곱으로 돌린 완전 연결층이 TFLite Micro의
-   `FullyConnected`와 비트 단위로 같은지(6.4절).
+4. 코드로 확인함(2026-11-16): 가중치 zero point가 0이면 TFLite Micro의
+   `FullyConnected`는 1x1 `ConvPerChannel`과 산술이 같다(npu-spec.md
+   8.2절). 비트 일치 시험은 M2에서 한다(6.4절).
 
 ---
 
@@ -705,19 +707,19 @@ TFLite `schema.fbs`(Apache-2.0).
 |----------|--------|---------|
 | QEMU | master `f29ccc2`(2026-11-03) | D1 `docs/devel/tcg-icount.rst`; `hw/misc/edu.c`(DMA 타이머 191행, 스레드 325·388행, `bql_lock` 364행, PCI 439행); `hw/arm/virt.c`(`base_memmap` 174-224, `a15irqmap` 262-274, MMIO 연결 1100-1115, ITS 1120, GICv2m 1143, `create_rtc` 1564, `create_secure_gpio_pwr` 1637-1668, `create_gpio_devices` 1670, 워치독 DT 2101, PCIe 2151-2282, `msi-map` 2238, PSCI conduit 2967-2973); `hw/arm/boot.c`(`have_dtb` 276, `/memory` 재작성 530-575, 펌웨어용 DTB를 RAM 시작에 둠 1125, `arm_load_dtb` 호출 1297); `hw/gpio/gpio_pwr.c`; `hw/watchdog/sbsa_gwdt.c`(WS0/WS1 232-252); `hw/arm/imx8mp-evk.c:87`; `hw/arm/raspi.c`(코어 수 고정 327, RAM 크기 검사 258-262); `hw/arm/bcm2838.c:262-263`; 실제 SoC 머신의 CPU 수(`min_cpus`/`max_cpus`); `-evb`/`-evk` 머신 이름; `hw/sd/pl181.c`, `hw/sd/sd.c`(이미지 크기 3125-3150); `include/hw/intc/arm_gicv3_common.h:46`; `hw/core/machine.c:1119`(`dumpdtb`); `include/hw/intc/arm_gic_common.h:33`의 `GIC_NCPU 8`; `scripts/checkpatch.pl:1434-1466`; `LICENSE` |
 | Linux | mainline `05441d6`(7.4-rc1, 2026-11-03) | `drivers/accel/*`의 버스 종류; Ethos-U 명령 해석(`ethosu_gem.c:385`, 405-426, `NPU_SET_*` case 72개), DMA 모드와 `dma_length()`(161-181, 652-678), 영역 베이스와 시작(`ethosu_job.c:50-56`, 69-73, 402, 436-453), 제출 때 크기 검사(`ethosu_job.c:490`), BO 대기(`ethosu_drv.c:92`), 클록과 runtime PM(`ethosu_drv.c:262-278`, 362), SRAM 크기(`ethosu_drv.c:284`, 288), 레지스터(`ethosu_device.h`); UAPI 헤더 `ethosu_accel.h`, `rocket_accel.h`; Rocket 레지스터 명령(`rocket_job.c:25-27`)과 `iommus` 요구; MMUv2가 없을 때만 하는 etnaviv 검증(`etnaviv_gem_submit.c:544-545`); NPU 바인딩(필수 속성)과 바인딩 라이선스 정책; RK3588 NPU와 PCIe 노드; Cortex-A72 SoC `.dtsi` 파일(26개 중 GICv3 18개, 코어 수와 MPIDR 값); 보드 `.dts` 이름 접미사; `pci-host-generic.c:56`; DRM accel 문서 |
-| Linux 릴리스 | kernel.org `releases.json`(2026-11-05 조회), GitHub `torvalds/linux` 태그 | stable 7.3.1, longterm 6.18.60; v6.18(`ethosu` 없음)과 v6.19의 `drivers/accel`; v6.12와 v6.18의 `include/drm/drm_gem.h`에 있는 `drm_gem_dma_resv_wait()`; v7.3 arm64 `defconfig`(`=y` 887개, `=m` 1,024개, `CONFIG_ARCH_*` 52개) |
+| Linux 릴리스 | kernel.org `releases.json`(2026-11-05 조회), GitHub `torvalds/linux` 태그 | stable 7.3.1, longterm 6.18.60; v6.18(`ethosu` 없음)과 v6.19의 `drivers/accel`; v6.12와 v6.18의 `include/drm/drm_gem.h`에 있는 `drm_gem_dma_resv_wait()`; v7.3 arm64 `defconfig`(`=y` 887개, `=m` 1,024개, `CONFIG_ARCH_*` 52개); v7.3 `drivers/accel/ethosu/ethosu_gem.c`의 명령 해석과 `OP_STOP` 위치 검사(행 번호는 `docs/npu-spec.md` 13절) |
 | U-Boot | master `ab4dc5a`(2026-11-02), 릴리스 v2026.10 | `qemu-arm.c:147-150`; `dts/Kconfig`(`OF_SEPARATE`, `OF_BOARD`, `OF_HAS_PRIOR_STAGE`); `arch/arm/Kconfig`(보드 Kconfig 2482행, `OF_HAS_PRIOR_STAGE`를 고르는 플랫폼); `boot/pxe_utils.c:645-662`; `lib/fdtdec.c:1779`; `drivers/mmc/arm_pl180_mmci.c:601-606`; `drivers/virtio/`; `doc/board/emulation/qemu-arm.rst:61-88`의 TF-A 흐름; `Licenses/README` |
 | TF-A | master `2fbca70`(2026-11-03), 릴리스 v2.15.0 | `plat/qemu`(`platform_def.h`: 클러스터 20-41, 보안 메모리 80-90, 보안 GPIO 92-95; `qemu_pm.c:217-253`; `qemu_bl2_setup.c`의 DT 수정과 `TRANSFER_LIST`); `platform.mk:17`, 159-160; `plat_helpers.mk:18-39`; `drivers/arm/pl061/pl061_gpio.c`; Rockchip `params_setup.c`(`poweroff_gpio`)와 `rk3399/drivers/soc/soc.c:342`; `imx8m_psci_common.c:163`; BSD-3-Clause 기여 규칙 |
 | Buildroot | master `f03de2f`(2026-11-02), 릴리스 2026.08.1 | `BR2_LINUX_KERNEL_CUSTOM_DTS_PATH`(`linux/Config.in:502`)와 설정 방식(228-267); `BR2_TARGET_UBOOT_CUSTOM_DTS_PATH`(`boot/uboot/Config.in:824`); Bootlin 외부 툴체인(`toolchain-external-bootlin`); Rust(`package/rustc/Config.in.host`, `package/pkg-cargo.mk`); `BR2_GLOBAL_PATCH_DIR`; 호스트 QEMU; TF-A 옵션; 커널 모듈 방식; `BR2_EXTERNAL` 매뉴얼 |
 | Buildroot 릴리스 | buildroot.org 내려받기 페이지(2026-11-05 조회) | 2026.08.1 안정판(지원 종료 2026년 12월); 2025.02.19 LTS(지원 종료 2028년 3월) |
-| TFLite Micro | `fd2a85d`(2026-11-04) | 참조 커널(`conv.h:54-131`); 반올림 구현(`common.cc:31-113`); `schema.fbs` |
+| TFLite Micro | `fd2a85d`(2026-11-04) | 참조 커널(`conv.h:54-131`); 반올림 구현(`common.cc:31-113`); `schema.fbs`; int8 `ConvPerChannel`, `FullyConnected`, `AddFunc`, `AveragePool`과 고정소수점 보조 함수(행 번호는 `docs/npu-spec.md` 13절) |
 | LiteRT | 양자화 규격(developers.google.com/edge/litert/models/quantization_spec, 2026-11-05 조회) | D6 |
 | MLPerf Tiny | `4addd0f`(2026-07-13) | ResNet-8 정의(`keras_model.py`, 35행의 "200k params"), int8 `.tflite` 파일, Apache-2.0 |
 | llvm-project | main `da1fdef`(24.0.0, 2026-11-05), 태그 `llvmorg-22.1.8`, `llvmorg-23.1.5` | `tosa.rescale`(`TosaOps.td:2651`), 반올림 enum(`TosaOpBase.td:397-403`); `ConvertConv2DToImg2Col.cpp`; 설치된 21.1.8은 문자열 속성을 씀(`TosaTypesBase.td:256-258`); `mlir/examples/standalone`(`CMakeLists.txt`, `standalone-opt`, `standalone-translate`) |
 | apt.llvm.org | noble, `libmlir-23-dev` 23.1.6 스냅숏(2026-11-03 빌드) | D17 |
 | Mesa | main `3df8fc4`(2026-11-05) | Ethos-U 반올림 방식(`ethosu_ml.h:98-100`); Teflon 장치 목록(`tfl_device.c:1649-1671`) |
 | TensorFlow | master `0e10898`(2026-11-04) | `tflite_to_tosa_bytecode`(`mlir.py:181`); 고정된 LLVM 커밋(`third_party/xla/third_party/llvm/workspace.bzl:22`) |
-| Arm Vela | `4e52413`(2026-11-04) | 자체 `tflite_reader.py`; 의존성 `flatbuffers`, `numpy`; `BasePointerIndex`(`high_level_command_to_npu_op.py:80-83`); NHCWB16 사용; `.tflite`와 `.npz` 출력(`vela.py:95-100`, `tflite_writer.py:198`); 대기 명령(`register_command_stream_generator.py:213-216`, 641-646); 사이클 추정(`npu_performance.py`) |
+| Arm Vela | `4e52413`(2026-11-04) | 자체 `tflite_reader.py`; 의존성 `flatbuffers`, `numpy`; `BasePointerIndex`(`high_level_command_to_npu_op.py:80-83`); NHCWB16 사용; `.tflite`와 `.npz` 출력(`vela.py:95-100`, `tflite_writer.py:198`); 대기 명령(`register_command_stream_generator.py:213-216`, 641-646); 명령 번호 공간(`ethos_u55_regs.py:574-673`); 진행 중 작업 수와 암묵 대기(`architecture_features.py:282-290`, 350, `register_command_stream_util.py:354-395`); 사이클 추정(`npu_performance.py`) |
 | IREE | `cbde0b0`(2026-11-04) | `iree-import-tflite`가 TensorFlow를 씀; TFLite 안내서의 TOSA 불안정 경고 |
 | Apache TVM | `cbb1e12`(2026-11-03) | `relax/frontend/tflite`가 `tflite` 패키지로 flatbuffer를 파싱 |
 | FSF | 라이선스 목록(gnu.org/licenses/license-list.html, 2026-11-05 조회) | Apache-2.0은 GPLv3와 호환되고 GPLv2와는 호환되지 않음; Expat(MIT)은 GPL과 호환 |

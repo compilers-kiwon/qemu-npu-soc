@@ -118,7 +118,7 @@ make -C output/build/linux-7.3.1 ARCH=arm64 CROSS_COMPILE=aarch64-buildroot-linu
 
 | 마일스톤 | 목표 | 상태 |
 |----------|------|------|
-| M1 | 합성곱 하나를 모든 층에 관통시킨다 | 진행 중. M1.1 저장소 뼈대, M1.2 펌웨어 체인 부팅(QEMU 머신, 디바이스 트리, TF-A, U-Boot, 리눅스 셸)까지 끝났다 |
+| M1 | 합성곱 하나를 모든 층에 관통시킨다 | 진행 중. M1.1 저장소 뼈대, M1.2 펌웨어 체인 부팅(QEMU 머신, 디바이스 트리, TF-A, U-Boot, 리눅스 셸), M1.3 NPU 명세 v0([docs/npu-spec.md](docs/npu-spec.md))까지 끝났다 |
 | M2 | MNIST CNN | 시작 전 |
 | M3 | MLPerf Tiny ResNet-8 | 시작 전 |
 | M4 | 마무리: 새로 받은 저장소에서 README만으로 빌드와 데모 | 시작 전 |
