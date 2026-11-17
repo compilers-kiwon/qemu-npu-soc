@@ -1,0 +1,95 @@
+From 60a7ac926ad88816df9bc6d76944416cf21429af Mon Sep 17 00:00:00 2001
+From: Kiwon Kwon <compilers@naver.com>
+Date: Tue, 17 Nov 2026 15:59:17 +0900
+Subject: [PATCH] hw/misc: add the kiwon-kn1-npu device
+
+Register the kn1 NPU: the Kconfig symbol, which the kiwon-kn1 SoC
+selects, the meson sources, the trace events and the kn1-npu qtest for
+the kn1-evb board. The sources themselves (hw/misc/kiwon-kn1-npu.c,
+include/hw/misc/kiwon-kn1-npu.h and tests/qtest/kn1-npu-test.c) are
+copied into the tree by the build, together with the shared command
+stream core (hw/misc/knpu_core.c, knpu_core.h, knpu_cmd.h).
+
+The shared core is MIT licensed because the same files are also linked
+into Apache-2.0 host tools; MIT is compatible with both licenses.
+
+Signed-off-by: Kiwon Kwon <compilers@naver.com>
+---
+ hw/arm/Kconfig          | 1 +
+ hw/misc/Kconfig         | 3 +++
+ hw/misc/meson.build     | 2 ++
+ hw/misc/trace-events    | 6 ++++++
+ tests/qtest/meson.build | 1 +
+ 5 files changed, 13 insertions(+)
+
+diff --git a/hw/arm/Kconfig b/hw/arm/Kconfig
+index 8b1cb8d..cf82c09 100644
+--- a/hw/arm/Kconfig
++++ b/hw/arm/Kconfig
+@@ -632,6 +632,7 @@ config KIWON_KN1
+     select PL061 # GPIO
+     select WDT_SBSA
+     select UNIMP
++    select KIWON_KN1_NPU
+ 
+ config KN1_EVB
+     bool
+diff --git a/hw/misc/Kconfig b/hw/misc/Kconfig
+index 1543ee6..84c6e1e 100644
+--- a/hw/misc/Kconfig
++++ b/hw/misc/Kconfig
+@@ -186,6 +186,9 @@ config AUX
+ config UNIMP
+     bool
+ 
++config KIWON_KN1_NPU
++    bool
++
+ config LED
+     bool
+ 
+diff --git a/hw/misc/meson.build b/hw/misc/meson.build
+index 23265f6..e6bb7f8 100644
+--- a/hw/misc/meson.build
++++ b/hw/misc/meson.build
+@@ -6,6 +6,8 @@ system_ss.add(when: 'CONFIG_ISA_TESTDEV', if_true: files('pc-testdev.c'))
+ system_ss.add(when: 'CONFIG_PCI_TESTDEV', if_true: files('pci-testdev.c'))
+ system_ss.add(when: 'CONFIG_IOMMU_TESTDEV', if_true: files('iommu-testdev.c'))
+ system_ss.add(when: 'CONFIG_UNIMP', if_true: files('unimp.c'))
++system_ss.add(when: 'CONFIG_KIWON_KN1_NPU',
++              if_true: files('kiwon-kn1-npu.c', 'knpu_core.c'))
+ system_ss.add(when: 'CONFIG_EMPTY_SLOT', if_true: files('empty_slot.c'))
+ system_ss.add(when: 'CONFIG_LED', if_true: files('led.c'))
+ system_ss.add(when: 'CONFIG_PVPANIC_COMMON', if_true: files('pvpanic.c'))
+diff --git a/hw/misc/trace-events b/hw/misc/trace-events
+index c9a868b..4795e4b 100644
+--- a/hw/misc/trace-events
++++ b/hw/misc/trace-events
+@@ -385,6 +385,12 @@ bcm2835_cprman_read(uint64_t offset, uint64_t value) "offset:0x%" PRIx64 " value
+ bcm2835_cprman_write(uint64_t offset, uint64_t value) "offset:0x%" PRIx64 " value:0x%" PRIx64
+ bcm2835_cprman_write_invalid_magic(uint64_t offset, uint64_t value) "offset:0x%" PRIx64 " value:0x%" PRIx64
+ 
++# kiwon-kn1-npu.c
++kn1_npu_read(uint64_t offset, uint64_t value) "offset 0x%" PRIx64 " value 0x%" PRIx64
++kn1_npu_write(uint64_t offset, uint64_t value) "offset 0x%" PRIx64 " value 0x%" PRIx64
++kn1_npu_job_start(uint64_t qbase, uint32_t qsize) "qbase 0x%" PRIx64 " qsize 0x%" PRIx32
++kn1_npu_job_done(uint8_t err_code, uint32_t err_offset, uint64_t macs, uint64_t ops) "err_code 0x%" PRIx8 " err_offset 0x%" PRIx32 " macs %" PRIu64 " ops %" PRIu64
++
+ # virt_ctrl.c
+ virt_ctrl_read(void *dev, unsigned int addr, unsigned int size, uint64_t value) "ctrl: %p reg: 0x%02x size: %d value: 0x%"PRIx64
+ virt_ctrl_write(void *dev, unsigned int addr, unsigned int size, uint64_t value) "ctrl: %p reg: 0x%02x size: %d value: 0x%"PRIx64
+diff --git a/tests/qtest/meson.build b/tests/qtest/meson.build
+index 78b3010..bf0b900 100644
+--- a/tests/qtest/meson.build
++++ b/tests/qtest/meson.build
+@@ -271,6 +271,7 @@ qtests_aarch64 = \
+    config_all_devices.has_key('CONFIG_TPM_TIS_I2C') ? ['tpm-tis-i2c-test', 'tpm-tis-i2c-swtpm-test'] : []) + \
+   (config_all_devices.has_key('CONFIG_ASPEED_SOC') ? qtests_aspeed64 : []) + \
+   (config_all_devices.has_key('CONFIG_NPCM8XX') ? qtests_npcm8xx : []) + \
++  (config_all_devices.has_key('CONFIG_KN1_EVB') ? ['kn1-npu-test'] : []) + \
+   (config_all_devices.has_key('CONFIG_IOMMU_TESTDEV') and
+    config_all_devices.has_key('CONFIG_ARM_VIRT') ?
+    ['iommu-smmuv3-test'] : []) + \
+-- 
+2.43.0
+

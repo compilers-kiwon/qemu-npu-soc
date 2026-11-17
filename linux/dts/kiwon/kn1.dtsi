@@ -128,6 +128,14 @@
 		clock-output-names = "apb_pclk";
 	};
 
+	/* The NPU does not model time; the rate only describes the clock */
+	npu_clk: clock-1000000000 {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <1000000000>;
+		clock-output-names = "npu_clk";
+	};
+
 	/* On-chip RAM for the secure world only (TF-A BL2 and BL31) */
 	memory@e000000 {
 		device_type = "memory";
@@ -186,6 +194,13 @@
 			clock-names = "apb_pclk";
 			status = "disabled";
 			secure-status = "okay";
+		};
+
+		npu@b000000 {
+			compatible = "kiwon,kn1-npu";
+			reg = <0x0 0x0b000000 0x0 0x10000>;
+			interrupts = <GIC_SPI 32 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&npu_clk>;
 		};
 
 		watchdog@f001000 {

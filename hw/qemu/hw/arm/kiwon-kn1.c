@@ -1,6 +1,7 @@
 /*
  * Kiwon kn1 SoC: 4x Cortex-A72, GICv3, PL011 UARTs, PL031 RTC,
- * SBSA generic watchdog, secure PL061 GPIO and secure on-chip RAM.
+ * SBSA generic watchdog, secure PL061 GPIO, secure on-chip RAM and the
+ * kn1-npu convolution NPU.
  *
  * Copyright (c) 2026 Kiwon Kwon
  *
@@ -61,6 +62,7 @@ static void kiwon_kn1_init(Object *obj)
 
     object_initialize_child(obj, "rtc", &s->rtc, TYPE_PL031);
     object_initialize_child(obj, "wdt", &s->wdt, TYPE_WDT_SBSA);
+    object_initialize_child(obj, "npu", &s->npu, TYPE_KIWON_KN1_NPU);
 }
 
 static bool kiwon_kn1_realize_cpus(KiwonKn1State *s, MachineState *ms,
@@ -255,13 +257,20 @@ static void kiwon_kn1_realize(DeviceState *dev, Error **errp)
                                 kiwon_kn1_memmap[KN1_SECURE_GPIO].base,
                                 sysbus_mmio_get_region(sbd, 0));
 
+    /* NPU: masters the non-secure bus for its DMA and command fetch */
+    sbd = SYS_BUS_DEVICE(&s->npu);
+    object_property_set_link(OBJECT(sbd), "memory", OBJECT(sysmem),
+                             &error_abort);
+    if (!sysbus_realize(sbd, errp)) {
+        return;
+    }
+    sysbus_mmio_map(sbd, 0, kiwon_kn1_memmap[KN1_NPU].base);
+    sysbus_connect_irq(sbd, 0, kiwon_kn1_spi(s, KN1_IRQ_NPU));
+
     /* Reserved windows: log accesses instead of faulting */
     create_unimplemented_device("kn1.gic-its",
                                 kiwon_kn1_memmap[KN1_GIC_ITS].base,
                                 kiwon_kn1_memmap[KN1_GIC_ITS].size);
-    create_unimplemented_device("kn1.npu",
-                                kiwon_kn1_memmap[KN1_NPU].base,
-                                kiwon_kn1_memmap[KN1_NPU].size);
     for (i = KN1_PCIE_MMIO; i <= KN1_PCIE_ECAM; i++) {
         static const char *const names[] = {
             [KN1_PCIE_MMIO] = "kn1.pcie-mmio",

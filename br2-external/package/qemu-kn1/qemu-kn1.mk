@@ -8,8 +8,9 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 
 # QEMU for the build host with the kiwon-kn1 SoC and the kn1-evb machine.
-# The upstream tarball is patched with hw/qemu/patches/ and the kn1 sources
-# from hw/qemu/ are copied into the tree. Modelled on Buildroot's host-qemu.
+# The upstream tarball is patched with hw/qemu/patches/; the kn1 sources
+# and qtests from hw/qemu/ and the shared NPU core from hw/npu-core/ are
+# copied into the tree. Modelled on Buildroot's host-qemu.
 
 QEMU_KN1_VERSION = 11.1.3
 QEMU_KN1_SOURCE = qemu-$(QEMU_KN1_VERSION).tar.xz
@@ -19,6 +20,7 @@ QEMU_KN1_LICENSE_FILES = COPYING COPYING.LIB
 
 # Our SoC, board and glue patch live outside the br2-external tree
 QEMU_KN1_KN1_SRC_DIR = $(BR2_EXTERNAL_KN1_PATH)/../hw/qemu
+QEMU_KN1_NPU_CORE_DIR = $(BR2_EXTERNAL_KN1_PATH)/../hw/npu-core
 
 HOST_QEMU_KN1_DEPENDENCIES = \
 	host-dtc \
@@ -39,6 +41,9 @@ HOST_QEMU_KN1_CFLAGS = $(HOST_CFLAGS) -I$(HOST_DIR)/include/libfdt
 define HOST_QEMU_KN1_ADD_KN1_SOURCES
 	cp -r $(QEMU_KN1_KN1_SRC_DIR)/hw/. $(@D)/hw/
 	cp -r $(QEMU_KN1_KN1_SRC_DIR)/include/. $(@D)/include/
+	cp -r $(QEMU_KN1_KN1_SRC_DIR)/tests/. $(@D)/tests/
+	cp $(addprefix $(QEMU_KN1_NPU_CORE_DIR)/,knpu_cmd.h knpu_core.h knpu_core.c) \
+		$(@D)/hw/misc/
 	$(APPLY_PATCHES) $(@D) $(QEMU_KN1_KN1_SRC_DIR)/patches \*.patch
 endef
 HOST_QEMU_KN1_POST_PATCH_HOOKS += HOST_QEMU_KN1_ADD_KN1_SOURCES

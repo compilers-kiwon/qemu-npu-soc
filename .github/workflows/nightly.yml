@@ -1,8 +1,8 @@
 # SPDX-FileCopyrightText: 2026 Kiwon Kwon
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-# Full Buildroot build and boot smoke test (docs/design.md D42). Runs every
-# night and on demand; the per-push checks are in ci.yml.
+# Full Buildroot build, boot smoke test and V1 (docs/design.md D42). Runs
+# every night and on demand; the per-push checks are in ci.yml.
 
 name: Nightly
 
@@ -65,6 +65,7 @@ jobs:
 
       # The full log goes to a file; only Buildroot's per-step lines are shown.
       - name: Build
+        id: build
         run: $BR_MAKE 2>&1 | tee build.log | grep --line-buffered '^>>>'
 
       - name: Boot smoke test
@@ -73,6 +74,11 @@ jobs:
           --images output/images
           --host-bin output/host/bin
           --log-dir output/test-logs
+
+      # Runs after a successful build even when the boot test failed
+      - name: V1 (kn1-npu qtest, device-introspect-test, qom-test)
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: tests/qemu/run-v1.sh output
 
       - name: Keep the end of the build log
         if: failure()

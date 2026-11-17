@@ -13,6 +13,7 @@
 #include "hw/core/sysbus.h"
 #include "hw/char/pl011.h"
 #include "hw/intc/arm_gicv3_common.h"
+#include "hw/misc/kiwon-kn1-npu.h"
 #include "hw/rtc/pl031.h"
 #include "hw/watchdog/sbsa_gwdt.h"
 #include "qemu/units.h"
@@ -40,7 +41,7 @@ enum KiwonKn1MemMap {
     KN1_UART1,                  /* secure, TF-A console */
     KN1_SECURE_GPIO,            /* power-off and reset lines */
     KN1_VIRTIO_MMIO,            /* board: 4 transports */
-    KN1_NPU,                    /* reserved until the NPU device is added */
+    KN1_NPU,
     KN1_SECURE_RAM,
     KN1_GWDT_REFRESH,
     KN1_GWDT_CONTROL,
@@ -81,6 +82,7 @@ struct KiwonKn1State {
     PL011State uart[KN1_NUM_UARTS];
     PL031State rtc;
     SBSA_GWDTState wdt;
+    KiwonKn1NpuState npu;
     DeviceState *gpio;
 
     /* Secure view of the bus: system memory plus the secure-only blocks */

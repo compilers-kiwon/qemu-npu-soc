@@ -133,17 +133,32 @@ ctest --test-dir build/npu-core --output-on-failure
   패딩, 두 반올림 방식, 채널별 재양자화, 2-D DMA를 다룬다. 명세의 오류
   코드와 `ERR_OFFSET`, 대기 누락이 내는 동기화 오류, 암묵 대기도 확인한다.
 
+## NPU 장치 시험
+
+QEMU의 `kiwon-kn1-npu` 장치(`hw/qemu/hw/misc/kiwon-kn1-npu.c`)는 레지스터,
+인터럽트(GIC SPI 32), 작업 실행을 맡고, 명령열은 공유 코어가 실행한다.
+`CTRL.START`는 bottom half를 예약하므로 완료는 언제나 MMIO 쓰기 뒤에 온다.
+SRAM 크기는 `-global kiwon-kn1-npu.sram-size=32768`처럼 바꿀 수 있다.
+
+V1은 전체 빌드가 남긴 QEMU 빌드 트리에서 돈다. kn1-npu qtest(레지스터,
+인터럽트, DMA와 명령, 오류, 카운터, soft reset, SRAM 크기)와 QEMU의
+`device-introspect-test`, `qom-test`를 돌린다.
+
+```bash
+tests/qemu/run-v1.sh
+```
+
 ## CI
 
 GitHub Actions에서는 push마다 defconfig, `check-package`, `reuse lint`,
 NPU 공유 코어 시험(V2, V3)을 돌리고(`ci.yml`), 매일 밤과 수동 실행 때 전체
-빌드와 부팅 시험을 돌린다(`nightly.yml`).
+빌드, 부팅 시험, V1을 돌린다(`nightly.yml`).
 
 ## 현재 상태
 
 | 마일스톤 | 목표 | 상태 |
 |----------|------|------|
-| M1 | 합성곱 하나를 모든 층에 관통시킨다 | 진행 중. M1.1 저장소 뼈대, M1.2 펌웨어 체인 부팅(QEMU 머신, 디바이스 트리, TF-A, U-Boot, 리눅스 셸), M1.3 NPU 명세 v0([docs/npu-spec.md](docs/npu-spec.md)), M1.4 NPU 공유 코어와 정답값 비교(V2, V3)까지 끝났다 |
+| M1 | 합성곱 하나를 모든 층에 관통시킨다 | 진행 중. M1.1 저장소 뼈대, M1.2 펌웨어 체인 부팅(QEMU 머신, 디바이스 트리, TF-A, U-Boot, 리눅스 셸), M1.3 NPU 명세 v0([docs/npu-spec.md](docs/npu-spec.md)), M1.4 NPU 공유 코어와 정답값 비교(V2, V3), M1.5 QEMU NPU 장치(V1)까지 끝났다 |
 | M2 | MNIST CNN | 시작 전 |
 | M3 | MLPerf Tiny ResNet-8 | 시작 전 |
 | M4 | 마무리: 새로 받은 저장소에서 README만으로 빌드와 데모 | 시작 전 |
