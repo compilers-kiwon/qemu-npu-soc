@@ -65,8 +65,9 @@ make -C buildroot O="$PWD/output" BR2_EXTERNAL="$PWD/br2-external"
 ```
 
 두 번째 `make`가 툴체인, TF-A 2.15.0(`plat/kiwon/kn1`), U-Boot 2026.10,
-Linux 7.3.1(arm64 `defconfig`), 루트 파일 시스템, 디바이스 트리, 그리고
-kn1-evb 머신을 넣은 QEMU 11.1.3을 모두 빌드한다. 결과물은 `output/images/`에
+Linux 7.3.1(arm64 `defconfig`에 `CONFIG_DRM_ACCEL`), NPU 드라이버 모듈
+`knpu`와 V5 시험 프로그램, 루트 파일 시스템, 디바이스 트리, 그리고 kn1-evb
+머신을 넣은 QEMU 11.1.3을 모두 빌드한다. 결과물은 `output/images/`에
 놓인다: `bl1.bin`과 `fip.bin`(BL2, BL31, U-Boot)을 합친 부트 플래시 이미지
 `flash.bin`, 루트 파일 시스템 `rootfs.ext4`(`/boot/Image`,
 `/boot/kn1-evb.dtb`, `/boot/extlinux/extlinux.conf` 포함)를 GPT 파티션 하나에
@@ -103,11 +104,14 @@ U-Boot는 FIP 안에 들어가므로, U-Boot를 고쳤을 때도 TF-A를 다시 
 WSL에서는 Windows 경로가 섞인 `PATH`를 Buildroot가 거부하므로, `make` 앞에
 `PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`을 붙인다.
 
-디바이스 트리를 리눅스 바인딩 스키마로 검사하려면 호스트에 dt-schema(pip
-`dtschema`)를 두고 커널 빌드 디렉터리에서 다음을 돌린다.
+NPU 바인딩과 디바이스 트리는 리눅스 스키마로 검사한다. 호스트에
+dt-schema(pip `dtschema`), yamllint, flex, bison이 있으면, 다음 스크립트가
+커널 tarball을 임시 디렉터리에 풀어 바인딩의 `dt_binding_check`와
+`kn1-evb.dtb`의 `CHECK_DTBS`를 돌린다. 전체 빌드가 받아 둔 tarball을 쓰면
+된다.
 
 ```bash
-make -C output/build/linux-7.3.1 ARCH=arm64 CROSS_COMPILE=aarch64-buildroot-linux-gnu- CHECK_DTBS=y kiwon/kn1-evb.dtb
+tests/dt/check-dt.sh buildroot/dl/linux/linux-7.3.1.tar.xz
 ```
 
 ## NPU 공유 코어 시험
@@ -148,17 +152,37 @@ V1은 전체 빌드가 남긴 QEMU 빌드 트리에서 돈다. kn1-npu qtest(레
 tests/qemu/run-v1.sh
 ```
 
+## knpu 드라이버 시험
+
+`linux/knpu/`는 DRM accel 드라이버(`/dev/accel/accel0`)이고, Buildroot가
+트리 밖 모듈로 빌드한다. 사용자 공간 인터페이스는
+`linux/include/uapi/drm/knpu_accel.h`의 ioctl 9개다. 명령열은 커널 버퍼로
+복사한 뒤 검증하고(설계 8.4절), 제출할 때는 영역마다 붙인 버퍼가 명령열이
+닿는 크기보다 작지 않은지 본다. 보드 DT가 NPU 전용 CMA 풀을 4 GiB 위에
+두므로 NPU 버퍼의 주소는 모두 64비트다.
+
+V5는 펌웨어 체인으로 부팅한 게스트에서 돈다. `knpu` 모듈을 올려 시험
+프로그램 `knpu-test`(`tests/driver/knpu_test.c`)를 돌리고, 모듈을 내렸다가
+다시 올려 한 번 더 돌린다. ioctl, 검증기와 제출 검사의 부정 시험, 4 GiB 위의
+버퍼, 장치 오류와 타임아웃 뒤의 복구(debugfs `inject_hang`), 성능 카운터,
+runtime PM을 확인한다.
+
+```bash
+python3 tests/driver/kn1_v5_test.py
+```
+
 ## CI
 
 GitHub Actions에서는 push마다 defconfig, `check-package`, `reuse lint`,
-NPU 공유 코어 시험(V2, V3)을 돌리고(`ci.yml`), 매일 밤과 수동 실행 때 전체
-빌드, 부팅 시험, V1을 돌린다(`nightly.yml`).
+NPU 공유 코어 시험(V2, V3), 바인딩과 디바이스 트리의 스키마 검사를
+돌리고(`ci.yml`), 매일 밤과 수동 실행 때 전체 빌드, 부팅 시험, V1, V5를
+돌린다(`nightly.yml`).
 
 ## 현재 상태
 
 | 마일스톤 | 목표 | 상태 |
 |----------|------|------|
-| M1 | 합성곱 하나를 모든 층에 관통시킨다 | 진행 중. M1.1 저장소 뼈대, M1.2 펌웨어 체인 부팅(QEMU 머신, 디바이스 트리, TF-A, U-Boot, 리눅스 셸), M1.3 NPU 명세 v0([docs/npu-spec.md](docs/npu-spec.md)), M1.4 NPU 공유 코어와 정답값 비교(V2, V3), M1.5 QEMU NPU 장치(V1)까지 끝났다 |
+| M1 | 합성곱 하나를 모든 층에 관통시킨다 | 진행 중. M1.1 저장소 뼈대, M1.2 펌웨어 체인 부팅(QEMU 머신, 디바이스 트리, TF-A, U-Boot, 리눅스 셸), M1.3 NPU 명세 v0([docs/npu-spec.md](docs/npu-spec.md)), M1.4 NPU 공유 코어와 정답값 비교(V2, V3), M1.5 QEMU NPU 장치(V1), M1.6 `knpu` 드라이버(V5)까지 끝났다 |
 | M2 | MNIST CNN | 시작 전 |
 | M3 | MLPerf Tiny ResNet-8 | 시작 전 |
 | M4 | 마무리: 새로 받은 저장소에서 README만으로 빌드와 데모 | 시작 전 |

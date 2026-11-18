@@ -1,9 +1,9 @@
-// SPDX-FileCopyrightText: 2026 Kiwon Kwon
 // SPDX-License-Identifier: GPL-2.0-or-later OR MIT
+// SPDX-FileCopyrightText: 2026 Kiwon Kwon
 /*
  * Kiwon kn1 SoC: 4x Cortex-A72, GICv3, PL011 UARTs, PL031 RTC,
- * SBSA generic watchdog, secure PL061 GPIO and secure on-chip RAM.
- * The NPU node is added once the device exists.
+ * SBSA generic watchdog, secure PL061 GPIO, secure on-chip RAM and the
+ * kn1-npu.
  */
 
 #include <dt-bindings/interrupt-controller/arm-gic.h>
@@ -196,7 +196,7 @@
 			secure-status = "okay";
 		};
 
-		npu@b000000 {
+		npu: npu@b000000 {
 			compatible = "kiwon,kn1-npu";
 			reg = <0x0 0x0b000000 0x0 0x10000>;
 			interrupts = <GIC_SPI 32 IRQ_TYPE_LEVEL_HIGH>;

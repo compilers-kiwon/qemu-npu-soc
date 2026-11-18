@@ -1,0 +1,14 @@
+# SPDX-FileCopyrightText: 2026 Kiwon Kwon
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+config BR2_PACKAGE_KNPU
+	bool "knpu"
+	depends on BR2_LINUX_KERNEL
+	help
+	  DRM accel driver for the kn1-npu (/dev/accel/accel0), built
+	  as an out-of-tree kernel module from linux/knpu/ of this
+	  repository. Turns on CONFIG_DRM_ACCEL in the kernel and
+	  installs the UAPI header drm/knpu_accel.h to staging.
+
+comment "knpu needs a Linux kernel to be built"
+	depends on !BR2_LINUX_KERNEL

@@ -57,6 +57,44 @@ jobs:
       - name: Run V2 and V3
         run: ctest --test-dir build/npu-core --output-on-failure
 
+  # Schema checks of the kn1-npu binding and the kn1-evb device tree against
+  # the pinned Linux release (M1.6)
+  dt-binding:
+    runs-on: ubuntu-24.04
+    env:
+      LINUX_TARBALL: linux-7.3.1.tar.xz
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install dt-schema, yamllint, flex and bison
+        run: |
+          sudo apt-get install -y flex bison
+          python3 -m venv "$HOME/dt-venv"
+          "$HOME/dt-venv/bin/pip" install --quiet dtschema==2026.9 yamllint==1.38.0
+          echo "$HOME/dt-venv/bin" >> "$GITHUB_PATH"
+
+      - name: Restore the Linux source tarball
+        id: linux-cache
+        uses: actions/cache@v6
+        with:
+          path: dl/${{ env.LINUX_TARBALL }}
+          key: ${{ env.LINUX_TARBALL }}
+
+      - name: Download the Linux source tarball
+        if: steps.linux-cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p dl
+          wget -q -O "dl/$LINUX_TARBALL" "https://cdn.kernel.org/pub/linux/kernel/v7.x/$LINUX_TARBALL"
+
+      # The same hash Buildroot checks when it builds the kernel
+      - name: Check the tarball hash
+        run: |
+          awk -v f="$LINUX_TARBALL" '$1 == "sha256" && $3 == f {print $2 "  dl/" f}' \
+            br2-external/patches/linux/linux.hash | sha256sum -c -
+
+      - name: Check the binding and the device tree
+        run: tests/dt/check-dt.sh "dl/$LINUX_TARBALL"
+
   reuse-lint:
     runs-on: ubuntu-24.04
     steps:

@@ -1,8 +1,8 @@
 # SPDX-FileCopyrightText: 2026 Kiwon Kwon
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-# Full Buildroot build, boot smoke test and V1 (docs/design.md D42). Runs
-# every night and on demand; the per-push checks are in ci.yml.
+# Full Buildroot build, boot smoke test, V1 and V5 (docs/design.md D42).
+# Runs every night and on demand; the per-push checks are in ci.yml.
 
 name: Nightly
 
@@ -79,6 +79,14 @@ jobs:
       - name: V1 (kn1-npu qtest, device-introspect-test, qom-test)
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: tests/qemu/run-v1.sh output
+
+      - name: V5 (knpu driver)
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: >
+          python3 tests/driver/kn1_v5_test.py
+          --images output/images
+          --host-bin output/host/bin
+          --log-dir output/test-logs
 
       - name: Keep the end of the build log
         if: failure()

@@ -1,0 +1,59 @@
+# SPDX-License-Identifier: GPL-2.0-only OR BSD-2-Clause
+# Copyright (c) 2026 Kiwon Kwon
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/npu/kiwon,kn1-npu.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Kiwon kn1-npu
+
+maintainers:
+  - Kiwon Kwon <compilers@naver.com>
+
+description: >
+  The kn1-npu is the int8 neural network accelerator of the Kiwon kn1 SoC.
+  It runs command streams of convolution, element-wise addition and average
+  pooling operations on an internal SRAM scratchpad, which DMA commands
+  fill from up to eight memory regions. The SoC has no IOMMU, so buffers
+  are physically contiguous and their addresses may be above 4 GiB.
+
+properties:
+  compatible:
+    const: kiwon,kn1-npu
+
+  reg:
+    maxItems: 1
+
+  interrupts:
+    maxItems: 1
+
+  clocks:
+    maxItems: 1
+
+  memory-region:
+    description:
+      Contiguous memory pool (shared-dma-pool) for the buffers the NPU
+      accesses. Without it the buffers come from the default CMA area.
+    maxItems: 1
+
+required:
+  - compatible
+  - reg
+  - interrupts
+  - clocks
+
+additionalProperties: false
+
+examples:
+  - |
+    #include <dt-bindings/interrupt-controller/arm-gic.h>
+    #include <dt-bindings/interrupt-controller/irq.h>
+
+    npu@b000000 {
+        compatible = "kiwon,kn1-npu";
+        reg = <0x0b000000 0x10000>;
+        interrupts = <GIC_SPI 32 IRQ_TYPE_LEVEL_HIGH>;
+        clocks = <&npu_clk>;
+        memory-region = <&npu_pool>;
+    };
+...

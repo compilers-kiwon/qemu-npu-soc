@@ -1,0 +1,14 @@
+# SPDX-License-Identifier: GPL-2.0-only OR MIT
+# Copyright (c) 2026 Kiwon Kwon
+#
+# Out-of-tree build: make -C <kernel tree> M=$PWD modules
+#
+# The UAPI header lives in ../include/uapi/drm and includes "drm.h" from the
+# kernel's own UAPI directory. knpu_cmd.h comes from ../../hw/npu-core in the
+# repository; the Buildroot package copies it next to the sources instead.
+
+obj-m += knpu.o
+knpu-y := knpu_drv.o knpu_gem.o knpu_job.o knpu_perfmon.o
+
+ccflags-y += -I$(src)/../include/uapi -I$(srctree)/include/uapi/drm
+ccflags-y += $(if $(wildcard $(src)/../../hw/npu-core),-I$(src)/../../hw/npu-core)

@@ -1,0 +1,14 @@
+# SPDX-FileCopyrightText: 2026 Kiwon Kwon
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+config BR2_PACKAGE_KNPU_TESTS
+	bool "knpu-tests"
+	depends on BR2_LINUX_KERNEL
+	select BR2_PACKAGE_KNPU
+	help
+	  V5, the knpu driver test that runs in the kn1-evb guest
+	  (/usr/bin/knpu-test), from tests/driver/ of this
+	  repository.
+
+comment "knpu-tests needs a Linux kernel to be built"
+	depends on !BR2_LINUX_KERNEL

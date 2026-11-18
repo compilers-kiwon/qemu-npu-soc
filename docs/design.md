@@ -77,7 +77,7 @@ QEMU ARMv8 `virt` 보드 위에 SystemC 가속기 모델, 리눅스 드라이버
 | D33 | 공유 장치 코어 라이선스 | QEMU 장치와 호스트 도구가 함께 쓰는 명령 해석기는 MIT. | QEMU `checkpatch.pl`은 MIT를 받아들인다(커밋 메시지에 이유를 적으라는 경고를 낸다). MIT 코드는 Apache-2.0 도구에도 링크할 수 있지만, Apache-2.0은 GPLv2와 호환되지 않는다(FSF 라이선스 목록). |
 | D34 | TF-A 플랫폼 | `plat/kiwon/kn1`의 `PLAT=kn1`. `plat/qemu/qemu`를 본뜨되 선택 기능은 뺀다. 소스는 `firmware/tf-a/`에 두고 빌드할 때 TF-A 트리로 복사한다. | `TF_PLATFORM_ROOT`는 도구 빌드용이고(`plat_helpers.mk:18`), 트리 밖 플랫폼을 위한 것이 아니다. |
 | D35 | 커널 설정 | 첫 부팅까지는 arm64 `defconfig`에 kn1 조각을 더해 쓰고, 그 뒤 최소 `kn1_defconfig`를 저장소에 둔다. | v7.3 arm64 `defconfig`는 SoC 플랫폼 52개와 옵션 약 1,900개를 켠다. 최소 설정은 kn1에 무엇이 필요한지 정확히 보여 준다. |
-| D36 | UAPI | Ethos-U 방식: 조회, 버퍼 생성, mmap 오프셋, 명령열 생성, 제출, 버퍼 대기(`drm_gem_dma_resv_wait()`), perfmon 생성·해제·읽기. | 같은 종류의 장치를 다루는 메인라인 드라이버와 모양이 같다. |
+| D36 | UAPI | Ethos-U 방식: 조회, 버퍼 생성, mmap 오프셋, 명령열 생성, 제출, 버퍼 대기(`drm_gem_dma_resv_wait()`처럼 기다리고, 실패한 작업은 `-EIO`로 알린다), perfmon 생성·해제·읽기. | 같은 종류의 장치를 다루는 메인라인 드라이버와 모양이 같다. |
 | D37 | 바인딩의 클록 | `clocks`는 필수다. `kn1.dtsi`가 고정 클록을 제공하고, 드라이버는 runtime PM으로 이를 켠다. | 메인라인 NPU 바인딩 두 개가 모두 `clocks`를 요구한다(`arm,ethos.yaml`, `rockchip,rk3588-rknn-core.yaml`). |
 | D38 | 컴파일러 구조 | MLIR standalone 예제의 구성을 따르고 모두 C++로 짠다. 도구는 `knpu-opt`(패스), `knpu-translate`(`knpu` 다이얼렉트에서 `model.knpu`로), `knpu-compile`(전체 파이프라인)이다. Python은 임포터에만 쓴다(D12). | MLIR의 트리 밖 예제(`mlir/examples/standalone`)와 같은 구성이다. |
 | D39 | 모델 파일 | 자체 리틀 엔디언 컨테이너 `model.knpu`. | 런타임이 다른 라이브러리 없이 읽는다. |
@@ -205,7 +205,11 @@ QEMU에 종료나 리셋을 요청한다(`hw/gpio/gpio_pwr.c`). `gpio-pwr`는 �
   `status = "disabled"`와 `secure-status = "okay"`를 단다. `virt`가 보안
   GPIO에 하는 방식과 같다.
 - `linux/dts/kiwon/kn1-evb.dts`: 보드(compatible, 4 GiB 메모리, `chosen`,
-  virtio-mmio 저장 장치).
+  virtio-mmio 저장 장치, NPU 전용 CMA 풀). 풀은 DRAM의 마지막 64 MiB
+  (`0x1_3C00_0000`)에 둔 `reusable` `shared-dma-pool`이고, NPU 노드의
+  `memory-region`이 가리킨다. 그래서 NPU 버퍼는 모두 4 GiB 위에 놓인다(D26).
+  arm64는 기본 CMA 영역을 4 GiB 아래에 두므로(`arch/arm64/mm/init.c`), 풀이
+  없으면 64비트 주소가 쓰이지 않는다.
 - `linux/bindings/npu/kiwon,kn1-npu.yaml`: NPU 바인딩(8.5절).
 - U-Boot는 `kn1-evb.dts`로 자기 제어용 DT를 빌드한다(`OF_SEPARATE`.
   Buildroot가 `BR2_TARGET_UBOOT_CUSTOM_DTS_PATH`로 소스를 복사한다).
@@ -221,6 +225,9 @@ QEMU에 종료나 리셋을 요청한다(`hw/gpio/gpio_pwr.c`). `gpio-pwr`는 �
   v7.3.1의 `dtbs_check`는 이를 오류로 보지 않고, 루트 노드의 compatible에
   맞는 보드 스키마가 없다는 경고만 낸다(2026-11-06 확인). 연결 패치는 두지
   않는다.
+- `tests/dt/check-dt.sh`가 커널 tarball을 풀어 NPU 바인딩의
+  `dt_binding_check`와 `kn1-evb.dtb`의 `CHECK_DTBS`를 돌린다. 위의 루트
+  compatible 경고만 허용하고, push마다 CI가 돌린다.
 
 ---
 
@@ -479,54 +486,100 @@ Linux 7.3.1(D43)을 Buildroot로 빌드한다. 설정(D35)은 첫 부팅까지 a
 PL011, PL031, SBSA 워치독, virtio-mmio 블록, 고정 클록, DRM accel(`knpu`
 모듈용)이다.
 
+`CONFIG_DRM_ACCEL`은 `knpu` 패키지가 Buildroot의 커널 설정 수정
+(`KNPU_LINUX_CONFIG_FIXUPS`)으로 켠다. 드라이버가 쓰는 GEM DMA 헬퍼와
+`drm_sched`는 프롬프트가 없는 심볼이라 다른 드라이버가 select해야 켜진다.
+지금은 arm64 `defconfig`의 드라이버들이 켠다. 패키지는 빌드 전에 세 옵션이
+모두 켜졌는지 확인한다(13절).
+
 ### 8.2 드라이버 `knpu`
 
+`linux/knpu/`. 구조는 `drivers/accel/ethosu`를 따른다(`drv`, `gem`, `job`,
+`perfmon`).
+
 - DRM accel 드라이버(`DRIVER_COMPUTE_ACCEL`, `/dev/accel/accel0`)다.
-  Buildroot의 커널 모듈 방식으로 트리 밖 모듈로 빌드한다(D15).
-- 버퍼: GEM DMA 헬퍼(연속 메모리. SoC에 IOMMU가 없다). DRAM이 4 GiB 위까지
-  있으므로 DMA 마스크는 32비트보다 넓다(D26).
-- 작업: 하드웨어 큐 하나에 `drm_sched`. 타임아웃이 나면 soft reset한다.
-- 클록: DT에서 받아 작업 전후로 runtime PM을 통해 켜고 끈다.
-  `ethosu_drv.c`와 같은 방식이다(D37).
+  Buildroot의 커널 모듈 방식으로 트리 밖 모듈로 빌드한다(D15). 명령 번호는
+  QEMU 장치와 같은 `hw/npu-core/knpu_cmd.h`를 빌드할 때 복사해 쓴다.
 - probe: `"kiwon,kn1-npu"`로 `of_match_table`을 맞추고, `ID`, `VERSION`,
-  `CONFIG`, `SRAM_SIZE`를 읽는다.
+  `CONFIG`, `SRAM_SIZE`를 읽는다. `ID`, `VERSION.MAJOR`, 영역 수 중 하나라도
+  다르면 거부한다(명세 3.2절).
+- 버퍼: GEM DMA 헬퍼(연속 메모리. SoC에 IOMMU가 없다). 장치의 주소
+  레지스터가 64비트이므로 DMA 마스크도 64비트다(D26). DT의 `memory-region`이
+  있으면 그 CMA 풀에서 할당한다(5.5절). 마스크가 좁으면 `dma-direct`가 풀
+  대신 4 GiB 아래의 페이지를 조용히 내주므로, V5가 장치에 쓴 주소를 확인한다.
+- 작업: 하드웨어 큐 하나에 `drm_sched`(한 번에 한 작업). 영역 버퍼마다 작업의
+  fence를 단다(DMA가 쓰는 영역은 쓰기, 나머지는 읽기).
+- 오류: 장치가 오류로 멈추면 오류 코드와 `ERR_OFFSET`을 커널 로그에 남기고
+  그 작업의 fence를 `-EIO`로 끝낸다. 장치는 이미 멈춰 있으므로 리셋하지 않고
+  다음 작업을 받는다.
+- 타임아웃(500 ms): runtime PM으로 장치를 껐다 켜서 soft reset하고, 그 작업은
+  `-ECANCELED`로 끝난다. 완료 인터럽트가 올라와 있거나 처리 중인 작업은 멈춘
+  것으로 보지 않는다. QEMU는 작업을 메인 루프에서 한 번에 실행하므로, 긴
+  작업 뒤에는 게스트 시계가 한꺼번에 흐를 수 있기 때문이다.
+- 클록: DT에서 받아 runtime PM(autosuspend 50 ms)으로 켜고 끈다. resume은
+  soft reset 뒤 `IRQ_ENABLE`을 다시 쓴다. `ethosu_drv.c`와 같은 방식이다(D37).
+- debugfs(`/sys/kernel/debug/accel/<장치>/`): `inject_hang`에 1을 쓰면 다음
+  작업의 `START`를 쓰지 않아 타임아웃을 일으킨다(V5). `last_submit`은 마지막
+  작업에 쓴 `QBASE`, `QSIZE`, 영역 베이스를 보여 준다.
 
 ### 8.3 UAPI
 
-헤더 `include/uapi/drm/knpu_accel.h`는 `include/uapi/drm/ethosu_accel.h`를
-본뜨고(D36), Ethos-U와 Rocket의 UAPI 헤더처럼 MIT 라이선스다.
+헤더 `linux/include/uapi/drm/knpu_accel.h`는 `include/uapi/drm/ethosu_accel.h`를
+본뜨고(D36), Ethos-U와 Rocket의 UAPI 헤더처럼 MIT 라이선스다. Buildroot는
+이를 staging의 `drm/knpu_accel.h`로 설치한다.
 
 | ioctl | 용도 |
 |-------|------|
-| `KNPU_QUERY` | 버전, SRAM 크기, 영역 수, 반올림 방식 |
+| `KNPU_QUERY` | `ID`, `VERSION`, `CONFIG` 레지스터와 SRAM 크기. 영역 수와 반올림 방식은 `CONFIG`에서 읽는다 |
 | `KNPU_BO_CREATE` | 버퍼를 할당하고 GEM 핸들을 돌려준다 |
-| `KNPU_BO_MMAP_OFFSET` | 버퍼의 mmap 오프셋 |
-| `KNPU_BO_WAIT` | 버퍼를 쓰는 작업이 끝나기를 기다린다(`drm_gem_dma_resv_wait()`), 절대 시각 타임아웃 |
+| `KNPU_BO_MMAP_OFFSET` | 버퍼의 mmap 오프셋. 명령열 버퍼는 매핑할 수 없다 |
+| `KNPU_BO_WAIT` | 버퍼를 쓰는 작업이 끝나기를 기다린다. 절대 시각 타임아웃이 지나면 `-ETIME`, 그 버퍼를 마지막으로 쓴 작업이 실패했으면 `-EIO` |
 | `KNPU_CMDSTREAM_CREATE` | 사용자 메모리의 명령열을 커널 소유 버퍼로 복사하고 검증한다 |
-| `KNPU_SUBMIT` | 명령열 핸들, 영역 버퍼 핸들, 선택적인 perfmon |
+| `KNPU_SUBMIT` | 명령열 핸들, 영역마다 버퍼 핸들, 선택적인 perfmon |
 | `KNPU_PERFMON_CREATE` | 성능 카운터 객체를 만든다 |
 | `KNPU_PERFMON_DESTROY` | 그 객체를 없앤다 |
-| `KNPU_PERFMON_GET_VALUES` | 그 객체로 제출한 작업들이 누적한 카운터를 읽는다 |
+| `KNPU_PERFMON_GET_VALUES` | 그 객체로 제출한 작업들이 누적한 카운터 4개(명세 11절)를 읽는다 |
+
+Ethos-U와 다른 점:
+
+- `SUBMIT`은 작업 배열 대신 작업 하나를 받고, SRAM 크기 인자가 없다. SRAM이
+  NPU 안에 있기 때문이다.
+- perfmon은 고정 카운터 4개를 모으므로 이벤트를 고르는 인자가 없고,
+  `PERFMON_SET_GLOBAL`도 두지 않는다.
+- `BO_WAIT`는 기다리기만 하지 않고 실패한 작업을 `-EIO`로 알린다.
+  `drm_gem_dma_resv_wait()`는 fence의 오류를 보지 않는다. 기다린 뒤에는 예약
+  객체를 잠그고 fence를 본다. 잠그지 않은 순회는 signal된 fence를 건너뛰기
+  때문이다(`dma-resv.c`). fence context마다 가장 최근 것만 본다.
 
 ### 8.4 명령열 검증기
 
-`ethosu_gem_cmdstream_copy_and_validate()`처럼 복사한 뒤 검증한다. 그래서
-검사가 끝난 명령열을 사용자 공간이 바꿀 수 없다.
+`ethosu_gem_cmdstream_copy_and_validate()`처럼 먼저 복사한 뒤 커널 안의
+사본을 검증한다. 그래서 검사가 끝난 명령열을 사용자 공간이 바꿀 수 없다.
 
-- 알 수 없는 명령과 잘린 페이로드를 거부한다.
-- SET 상태를 추적하고, DMA마다 각 영역에서 건드리는 바이트 범위를 계산한다.
-  계산할 때 오버플로를 검사한다(Ethos-U의 `dma_length()`처럼).
-- 영역마다 필요한 크기를 기록하고, 제출할 때 붙인 버퍼가 그보다 작지 않은지
-  본다.
-- SRAM 범위를 `SRAM_SIZE`와 비교한다.
+- 알 수 없는 명령(비트 15가 1인 워드 포함)과 잘린 페이로드를 거부한다.
+  명세 v0의 명령은 M1의 공유 코어가 아직 실행하지 않는 것까지 모두 받는다.
+- 마지막 워드는 `OP_STOP`이어야 한다(Ethos-U와 같다). 그 뒤의 워드는 실행되지
+  않기 때문이다.
+- DMA 상태(`DMA_SRC`, `DMA_DST`, `DMA_LEN`, `DMA_COUNT`, `DMA_STRIDE`)를
+  기본값부터 추적한다. 공간 종류나 영역 번호를 해석할 수 없거나, 두 쪽이
+  모두 SRAM이거나 모두 영역인 `OP_DMA`는 거부한다.
+- `OP_DMA`마다 영역 쪽이 `오프셋 + (COUNT−1)·STRIDE + LEN`까지 닿는다고 보고,
+  64비트 오버플로를 검사하며, 영역마다 그 최댓값을 기록한다(Ethos-U의
+  `dma_length()`처럼). DMA가 쓰는 영역은 출력 영역으로 표시한다.
+- `OP_DMA`의 SRAM 쪽 범위(`LEN·COUNT` 바이트)를 `SRAM_SIZE`와 비교한다. 연산
+  명령의 SRAM 범위와 필드 값은 장치가 검사한다(`SRAM_RANGE`, `BAD_PARAM`).
+- 제출할 때, 명령열이 쓰는 영역마다 버퍼가 있어야 하고 기록한 크기보다 작지
+  않아야 한다(작으면 `-EOVERFLOW`). 쓰지 않는 영역에 붙인 버퍼, 두 영역에 붙인
+  같은 버퍼, 영역에 붙인 명령열 버퍼는 거부한다.
 
 대기 누락은 붙인 버퍼 밖의 메모리에 닿을 수 없으므로 검증기가 다룰 일이
 아니다. 장치가 보고한다(6.9절).
 
 ### 8.5 디바이스 트리 바인딩
 
-`kiwon,kn1-npu.yaml`은 `arm,ethos.yaml`처럼 `compatible`, `reg`,
-`interrupts`, `clocks`를 필수로 둔다(D37). `kn1.dtsi`는 클록을
+`linux/bindings/npu/kiwon,kn1-npu.yaml`은 `arm,ethos.yaml`처럼 `compatible`,
+`reg`, `interrupts`, `clocks`를 필수로 둔다(D37). `memory-region`은 선택이고,
+보드가 NPU 전용 CMA 풀을 줄 때 쓴다(5.5절). `kn1.dtsi`는 클록을
 `fixed-clock` 노드로 제공한다. 시간을 모델링하지 않으므로(D1) 주파수 값은
 설명용일 뿐이다.
 
@@ -610,13 +663,15 @@ CPU 후처리 연산.
 | V2 | 정답값: 두 번 빌드한 TFLite Micro 참조 커널(이중·단일 반올림)로 층별, 끝-끝 정답을 만든다 | 호스트 |
 | V3 | 컴파일한 명령열을 공유 장치 코어에서 실행해 V2와 비트 단위로 비교 | 호스트 |
 | V4 | 컴파일러 패스 | `lit` / `FileCheck` |
-| V5 | 드라이버: 검증기 부정 시험(잘못된 명령열과 범위를 벗어난 명령열은 거부돼야 함), 4 GiB 위의 버퍼 | 게스트 |
+| V5 | 드라이버: 검증기 부정 시험(잘못된 명령열과 범위를 벗어난 명령열은 거부돼야 함), 4 GiB 위의 버퍼, 장치 오류와 타임아웃 뒤 복구, perfmon, runtime PM, 모듈 재적재 | 게스트 |
 | V6 | 끝-끝: kn1-evb를 부팅해 MNIST CNN과 ResNet-8을 돌리고, V2와 비교하고, 카운터를 보고 | QEMU |
 
 CI(D42, GitHub Actions): push마다 V2~V4를 돌리고, 매일 밤과 수동 실행 때
-Buildroot 전체 빌드와 V1, V5, V6을 돌린다.
+Buildroot 전체 빌드와 V1, V5, V6을 돌린다. 바인딩과 DT의 스키마 검사
+(`tests/dt/check-dt.sh`)도 push마다 돈다.
 야간 작업은 지금 전체 빌드, 부팅 스모크 시험(`tests/boot/`, M1.2 완료
-조건), V1(`tests/qemu/run-v1.sh`)을 돌리고, V5와 V6은 생기는 대로 더한다.
+조건), V1(`tests/qemu/run-v1.sh`), V5(`tests/driver/kn1_v5_test.py`)를
+돌리고, V6은 생기면 더한다.
 
 ---
 
@@ -698,6 +753,10 @@ TFLite `schema.fbs`(Apache-2.0).
 4. 코드로 확인함(2026-11-16): 가중치 zero point가 0이면 TFLite Micro의
    `FullyConnected`는 1x1 `ConvPerChannel`과 산술이 같다(npu-spec.md
    8.2절). 비트 일치 시험은 M2에서 한다(6.4절).
+5. 최소 `kn1_defconfig`로 갈 때(D35): `knpu`가 쓰는 GEM DMA 헬퍼와
+   `drm_sched`는 프롬프트가 없는 심볼이다. 이를 select하는 드라이버 하나를
+   켜 두거나(예: `CONFIG_DRM_ACCEL_ARM_ETHOSU=m`) 리눅스 연결 패치를 둬야
+   한다(8.1절).
 
 ---
 
@@ -708,6 +767,7 @@ TFLite `schema.fbs`(Apache-2.0).
 | QEMU | master `f29ccc2`(2026-11-03) | D1 `docs/devel/tcg-icount.rst`; `hw/misc/edu.c`(DMA 타이머 191행, 스레드 325·388행, `bql_lock` 364행, PCI 439행); `hw/arm/virt.c`(`base_memmap` 174-224, `a15irqmap` 262-274, MMIO 연결 1100-1115, ITS 1120, GICv2m 1143, `create_rtc` 1564, `create_secure_gpio_pwr` 1637-1668, `create_gpio_devices` 1670, 워치독 DT 2101, PCIe 2151-2282, `msi-map` 2238, PSCI conduit 2967-2973); `hw/arm/boot.c`(`have_dtb` 276, `/memory` 재작성 530-575, 펌웨어용 DTB를 RAM 시작에 둠 1125, `arm_load_dtb` 호출 1297); `hw/gpio/gpio_pwr.c`; `hw/watchdog/sbsa_gwdt.c`(WS0/WS1 232-252); `hw/arm/imx8mp-evk.c:87`; `hw/arm/raspi.c`(코어 수 고정 327, RAM 크기 검사 258-262); `hw/arm/bcm2838.c:262-263`; 실제 SoC 머신의 CPU 수(`min_cpus`/`max_cpus`); `-evb`/`-evk` 머신 이름; `hw/sd/pl181.c`, `hw/sd/sd.c`(이미지 크기 3125-3150); `include/hw/intc/arm_gicv3_common.h:46`; `hw/core/machine.c:1119`(`dumpdtb`); `include/hw/intc/arm_gic_common.h:33`의 `GIC_NCPU 8`; `scripts/checkpatch.pl:1434-1466`; `LICENSE` |
 | Linux | mainline `05441d6`(7.4-rc1, 2026-11-03) | `drivers/accel/*`의 버스 종류; Ethos-U 명령 해석(`ethosu_gem.c:385`, 405-426, `NPU_SET_*` case 72개), DMA 모드와 `dma_length()`(161-181, 652-678), 영역 베이스와 시작(`ethosu_job.c:50-56`, 69-73, 402, 436-453), 제출 때 크기 검사(`ethosu_job.c:490`), BO 대기(`ethosu_drv.c:92`), 클록과 runtime PM(`ethosu_drv.c:262-278`, 362), SRAM 크기(`ethosu_drv.c:284`, 288), 레지스터(`ethosu_device.h`); UAPI 헤더 `ethosu_accel.h`, `rocket_accel.h`; Rocket 레지스터 명령(`rocket_job.c:25-27`)과 `iommus` 요구; MMUv2가 없을 때만 하는 etnaviv 검증(`etnaviv_gem_submit.c:544-545`); NPU 바인딩(필수 속성)과 바인딩 라이선스 정책; RK3588 NPU와 PCIe 노드; Cortex-A72 SoC `.dtsi` 파일(26개 중 GICv3 18개, 코어 수와 MPIDR 값); 보드 `.dts` 이름 접미사; `pci-host-generic.c:56`; DRM accel 문서 |
 | Linux 릴리스 | kernel.org `releases.json`(2026-11-05 조회), GitHub `torvalds/linux` 태그 | stable 7.3.1, longterm 6.18.60; v6.18(`ethosu` 없음)과 v6.19의 `drivers/accel`; v6.12와 v6.18의 `include/drm/drm_gem.h`에 있는 `drm_gem_dma_resv_wait()`; v7.3 arm64 `defconfig`(`=y` 887개, `=m` 1,024개, `CONFIG_ARCH_*` 52개); v7.3 `drivers/accel/ethosu/ethosu_gem.c`의 명령 해석과 `OP_STOP` 위치 검사(행 번호는 `docs/npu-spec.md` 13절) |
+| Linux v7.3.1 | Buildroot가 받은 tarball(2026-11-17) | `drivers/accel/ethosu`(드라이버 구조, `ethosu_job.c`의 타임아웃·IRQ·제출 검사, `ethosu_perfmon.c`, UAPI의 ioctl 10개); `drm_sched_start()`가 끝나지 않은 작업을 `-ECANCELED`로 끝냄(`sched_main.c:499`)과 `DRM_GPU_SCHED_STAT_NO_HANG`(366-367); 의존성 fence의 오류를 다음 작업에 넘기지 않음(오류를 다는 곳은 guilty 엔티티뿐, `sched_entity.c:547-549`); `drm_gem_dma_resv_wait()`(`drm_gem.c:903-925`); 잠그지 않은 fence 순회가 signal된 fence를 건너뜀(`dma-resv.c:402`); arm64 CMA 위치(`arch/arm64/mm/init.c:323`); `dma-direct`의 대신 할당(`kernel/dma/direct.c:127-148`); 드라이버 해제 순서(`drivers/base/dd.c`)와 `devm_pm_runtime_set_active_enabled()`(`runtime.c:1597-1632`); accel debugfs 위치(`drm_debugfs.c:400-407`); `ivpu`의 debugfs `force_recovery`; `arm,ethos.yaml`; arm64 `defconfig`의 `CONFIG_DRM_ACCEL` 꺼짐과 `DRM_GEM_DMA_HELPER`·`DRM_SCHED`=m |
 | U-Boot | master `ab4dc5a`(2026-11-02), 릴리스 v2026.10 | `qemu-arm.c:147-150`; `dts/Kconfig`(`OF_SEPARATE`, `OF_BOARD`, `OF_HAS_PRIOR_STAGE`); `arch/arm/Kconfig`(보드 Kconfig 2482행, `OF_HAS_PRIOR_STAGE`를 고르는 플랫폼); `boot/pxe_utils.c:645-662`; `lib/fdtdec.c:1779`; `drivers/mmc/arm_pl180_mmci.c:601-606`; `drivers/virtio/`; `doc/board/emulation/qemu-arm.rst:61-88`의 TF-A 흐름; `Licenses/README` |
 | TF-A | master `2fbca70`(2026-11-03), 릴리스 v2.15.0 | `plat/qemu`(`platform_def.h`: 클러스터 20-41, 보안 메모리 80-90, 보안 GPIO 92-95; `qemu_pm.c:217-253`; `qemu_bl2_setup.c`의 DT 수정과 `TRANSFER_LIST`); `platform.mk:17`, 159-160; `plat_helpers.mk:18-39`; `drivers/arm/pl061/pl061_gpio.c`; Rockchip `params_setup.c`(`poweroff_gpio`)와 `rk3399/drivers/soc/soc.c:342`; `imx8m_psci_common.c:163`; BSD-3-Clause 기여 규칙 |
 | Buildroot | master `f03de2f`(2026-11-02), 릴리스 2026.08.1 | `BR2_LINUX_KERNEL_CUSTOM_DTS_PATH`(`linux/Config.in:502`)와 설정 방식(228-267); `BR2_TARGET_UBOOT_CUSTOM_DTS_PATH`(`boot/uboot/Config.in:824`); Bootlin 외부 툴체인(`toolchain-external-bootlin`); Rust(`package/rustc/Config.in.host`, `package/pkg-cargo.mk`); `BR2_GLOBAL_PATCH_DIR`; 호스트 QEMU; TF-A 옵션; 커널 모듈 방식; `BR2_EXTERNAL` 매뉴얼 |

@@ -1,8 +1,10 @@
-// SPDX-FileCopyrightText: 2026 Kiwon Kwon
 // SPDX-License-Identifier: GPL-2.0-or-later OR MIT
+// SPDX-FileCopyrightText: 2026 Kiwon Kwon
 /*
  * Kiwon kn1-evb board: kn1 SoC, 4 GiB DRAM, 64 MiB secure boot flash,
- * four virtio-mmio transports and a GPIO-driven power controller.
+ * four virtio-mmio transports and a GPIO-driven power controller. The NPU
+ * gets its own CMA pool above 4 GiB, so every NPU buffer has a 64-bit
+ * address.
  */
 
 /dts-v1/;
@@ -30,6 +32,19 @@
 	memory@40000000 {
 		device_type = "memory";
 		reg = <0x0 0x40000000 0x1 0x00000000>;
+	};
+
+	reserved-memory {
+		#address-cells = <2>;
+		#size-cells = <2>;
+		ranges;
+
+		/* The last 64 MiB of DRAM; other users may borrow it while free */
+		npu_pool: npu-pool@13c000000 {
+			compatible = "shared-dma-pool";
+			reg = <0x1 0x3c000000 0x0 0x04000000>;
+			reusable;
+		};
 	};
 
 	/* Boot flash at the reset vector: BL1 and the FIP, secure world only */
@@ -83,4 +98,8 @@
 		status = "disabled";
 		secure-status = "okay";
 	};
+};
+
+&npu {
+	memory-region = <&npu_pool>;
 };
