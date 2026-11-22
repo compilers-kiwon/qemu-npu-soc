@@ -57,6 +57,42 @@ jobs:
       - name: Run V2 and V3
         run: ctest --test-dir build/npu-core --output-on-failure
 
+  # V2 to V4 for the model compiler (M1.7): lit tests of the knpu dialect,
+  # passes and model file writer, and the test model compiled from its
+  # .tflite through tflite2c, lcc and knpu-compile, run on the shared NPU
+  # core and compared with the TFLite Micro interpreter
+  compiler:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install MLIR 23 (apt.llvm.org) and Ninja
+        run: |
+          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key \
+            | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc
+          echo "deb https://apt.llvm.org/noble/ llvm-toolchain-noble-23 main" \
+            | sudo tee /etc/apt/sources.list.d/llvm-23.list
+          sudo apt-get update
+          sudo apt-get install -y libmlir-23-dev mlir-23-tools llvm-23-dev \
+            llvm-23-tools ninja-build
+
+      - name: Install the generator's Python package
+        run: |
+          python3 -m venv "$HOME/py-venv"
+          "$HOME/py-venv/bin/pip" install --quiet flatbuffers==25.9.23
+
+      - name: Configure (downloads lcc, TFLite Micro and FlatBuffers)
+        run: >
+          cmake -S compiler -B build/compiler -G Ninja
+          -DMLIR_DIR=/usr/lib/llvm-23/lib/cmake/mlir
+          -DPython3_EXECUTABLE=$HOME/py-venv/bin/python3
+
+      - name: Build
+        run: cmake --build build/compiler
+
+      - name: Run V4 (lit) and V2, V3 (end to end)
+        run: ctest --test-dir build/compiler --output-on-failure
+
   # Schema checks of the kn1-npu binding and the kn1-evb device tree against
   # the pinned Linux release (M1.6)
   dt-binding:

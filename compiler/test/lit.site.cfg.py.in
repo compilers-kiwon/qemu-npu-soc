@@ -1,0 +1,15 @@
+# SPDX-FileCopyrightText: 2026 Kiwon Kwon
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+
+@LIT_SITE_CFG_IN_HEADER@
+
+config.llvm_tools_dir = lit_config.substitute("@LLVM_TOOLS_DIR@")
+config.knpu_obj_root = "@KNPU_BINARY_DIR@"
+config.knpu_src_root = "@KNPU_SOURCE_DIR@"
+config.lcc_dir = "@KNPU_LCC_DIR@"
+
+import lit.llvm
+lit.llvm.initialize(lit_config, config)
+
+# Let the main config do the real work.
+lit_config.load_config(config, "@KNPU_SOURCE_DIR@/test/lit.cfg.py")

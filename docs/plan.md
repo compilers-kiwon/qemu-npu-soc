@@ -118,19 +118,38 @@ GitHub에서 한 번 성공한다.
 
 완료 조건: V5가 모두 통과하고, 바인딩이 스키마 검사를 통과한다.
 
-### M1.7 컴파일러 최소 경로 (V4)
+### M1.7 컴파일러 최소 경로 (V2~V4)
 
-- `models/`: 합성곱 하나짜리 int8 `.tflite`를 만드는 스크립트. TensorFlow는
-  시험 모델을 만드는 데만 쓰고, 컴파일러 경로에는 넣지 않는다(D12).
-- `tflite-import`: `CONV_2D`와 양자화 파라미터를 읽어 TOSA를 낸다.
-- `knpu` 다이얼렉트, TOSA에서 `knpu`로 낮추기, 타일링, SRAM 할당, 이중
-  버퍼링 스케줄링(D31), `knpu-translate`(D38).
+- `models/conv/`: 합성곱 하나(입력 14x14x8, 3x3 커널, 출력 16채널, `SAME`,
+  stride 1, ReLU)를 완전 int8로 양자화한 `.tflite`와 그것을 만드는 스크립트.
+  스크립트는 손으로 돌리고 결과 파일을 함께 둔다. TensorFlow는 시험 모델을
+  만드는 데만 쓰고, 컴파일러 경로와 CI에는 넣지 않는다(D12).
+- 생성기 `tflite2c`(설계 9.2절, 9.3절): `CONV_2D`를 C89 함수와
+  `#pragma knpu`로, 모델을 `knpu_model`로 쓴다. gcc 시험용 `main` 파일도
+  쓴다.
+- lcc: `compiler/` CMake가 `v4.2-llvm.3`의 aarch64 mlir 드라이버를
+  sha256으로 확인하며 내려받는다(설계 12.4절). lcc-opt는 M2에서 붙인다.
+  M1.7의 시험 모델은 NPU 층 하나뿐이고, 그 층 함수는 `knpu-import`가 NPU
+  연산으로 바꾼 뒤 지우므로 CPU 코드로 내릴 것이 남지 않는다.
+- `knpu` 다이얼렉트(그래프 연산 `conv2d`와 명령 연산), 패스 `knpu-import`,
+  `knpu-tile`(H 타일), `knpu-schedule`(SRAM과 arena 배치, 이중 버퍼링, D31),
+  `knpu-insert-waits`, 그리고 `knpu-translate`와 `knpu-compile`(설계 9.4절).
 - `docs/model-format.md`: `model.knpu` 형식 v0(D39, D40).
-- V4: 패스마다 `lit`/`FileCheck` 시험.
+- V2: TFLite Micro 인터프리터를 반올림 방식별로 두 번 빌드해 `.tflite`를
+  그대로 실행한다.
+- V4: 패스마다 `lit`/`FileCheck` 시험(오류 경로 포함)과, 실제 lcc 출력을
+  거치는 시험 하나.
+- CI: push마다 도는 `compiler` 작업(MLIR 23 설치, 빌드, V4, V3).
 
-완료 조건: SRAM 크기를 작게 잡아 타일이 둘 이상 나오게 컴파일한 합성곱이
-공유 코어에서 V2와 비트 단위로 같다(V3). 명령열에는 대기 명령이 들어 있고,
-동기화 오류 없이 실행된다.
+완료 조건:
+
+- 생성기가 쓴 C를 gcc로 돌린 결과가 두 반올림 방식 모두 V2와 같다.
+- SRAM 64 KiB(타일 하나)와, 타일이 둘 이상 나오는 작은 SRAM으로 컴파일한
+  합성곱이 공유 코어에서 두 반올림 방식 모두 V2와 비트 단위로 같다(V3).
+- 명령열에 대기 명령이 들어 있고 동기화 오류 없이 실행된다. 대기 삽입을 끄고
+  컴파일하면 동기화 오류로 멈춘다.
+- `PERF_MACS`와 `PERF_DMA_WR_BYTES`가 타일 수와 관계없이 계산값과 같다.
+- push CI의 `compiler` 작업이 한 번 성공한다.
 
 ### M1.8 런타임과 끝에서 끝까지 (V6)
 
@@ -149,6 +168,11 @@ GitHub에서 한 번 성공한다.
 
 - 연산: AVGPOOL, 1x1 합성곱으로 처리하는 FC, `RESHAPE`, CPU에서 도는
   softmax.
+- 생성기와 pragma: `FULLY_CONNECTED`, `AVERAGE_POOL_2D`, `RESHAPE`,
+  `SOFTMAX`를 C89로 쓰고, NPU 연산의 pragma 어휘를 더한다(설계 9.3절).
+- CPU 연산: softmax 같은 CPU 연산을 lcc-opt로 최적화해 aarch64 코드로
+  내린다(설계 13절 6번). lcc-opt를 받는 방법과 `model.knpu`의 CPU 섹션을
+  정해 구현한다.
 - FC를 1x1 합성곱으로 돌린 결과가 `FullyConnected`와 비트 단위로 같은지
   확인한다(설계 13절 4번).
 - 컴파일러: 여러 층으로 된 그래프, 층 사이의 SRAM과 arena 배치, 사이클
@@ -202,3 +226,4 @@ GitHub에서 한 번 성공한다.
 | 2. 비트 단위 NPU 명세 | M1.3 |
 | 3. 벤더 접두사 `kiwon`의 스키마 검사 | M1.2 |
 | 4. FC를 1x1 합성곱으로 돌린 결과의 비트 일치 | M2 |
+| 6. CPU 연산의 lcc-opt 경로 | M2 |

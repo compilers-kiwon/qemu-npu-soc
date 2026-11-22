@@ -7,6 +7,12 @@ path = ".gitmodules"
 SPDX-FileCopyrightText = "2026 Kiwon Kwon"
 SPDX-License-Identifier = "Apache-2.0 WITH LLVM-exception"
 
+# Test model made by models/conv/make_model.py
+[[annotations]]
+path = "models/conv/conv.tflite"
+SPDX-FileCopyrightText = "2026 Kiwon Kwon"
+SPDX-License-Identifier = "Apache-2.0 WITH LLVM-exception"
+
 [[annotations]]
 path = "br2-external/configs/*_defconfig"
 SPDX-FileCopyrightText = "2026 Kiwon Kwon"

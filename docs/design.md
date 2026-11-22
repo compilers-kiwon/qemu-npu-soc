@@ -53,12 +53,12 @@ QEMU ARMv8 `virt` 보드 위에 SystemC 가속기 모델, 리눅스 드라이버
 | D9 | 명령 형식 | Ethos-U 방식의 가변 길이 명령열로, 32비트 워드로 이루어진다. 상태를 설정하는 SET 명령, 연산을 수행하는 OP 명령, 비동기 연산을 위한 대기 명령(D31)이 있다. 커널은 명령열을 커널 버퍼로 복사하고 상태를 추적하며 검증한다. | 메인라인의 두 방식 중 IOMMU 없이 동작하는 쪽이다. Ethos-U는 커널에서 검증하고 `iommus` 속성이 없다. Rocket은 명령을 해석하지 않고 `iommus`를 요구한다. |
 | D10 | 주소 지정 | 연산 명령은 SRAM 오프셋만 쓴다. DRAM은 DMA 명령으로만 접근하고 (영역, 오프셋)으로 지정한다. 작업 하나에 버퍼를 최대 8개 영역에 붙이고, 드라이버가 그 DMA 주소를 영역 베이스 레지스터에 쓴다. | 명령열을 고칠 필요가 없어 컴파일한 모델을 그대로 재사용할 수 있다. Ethos-U와 같은 방식이다(`NPU_REG_BASEP(region)`). |
 | D11 | 재양자화 반올림 | 명령마다 이중 반올림(TFLite Micro 기본값)과 단일 반올림(`TFLITE_SINGLE_ROUNDING=1`) 중에서 고른다. 시험은 두 참조 빌드에 대해 모두 돈다. | Ethos-U도 연산마다 반올림 방식을 고른다(Mesa `ETHOSU_ROUNDING_DOUBLE/TRUNCATE/NATURAL`). |
-| D12 | 모델 가져오기 | 자체 임포터가 `.tflite` flatbuffer를 읽어, 고정한 MLIR 버전의 TOSA를 낸다. 컴파일러 경로에 TensorFlow는 없다. | Arm Vela와 Apache TVM도 `.tflite`를 직접 파싱한다. IREE는 TensorFlow의 `tflite_to_tosa_bytecode`를 쓰고, TOSA 버전이 바뀌는 동안 이 경로가 불안정하다고 문서에 적었다. |
+| D12 | 모델 가져오기 | `.tflite`가 원본이다. Python 생성기 `tflite2c`가 층마다 C89 함수 하나(본문은 TFLite Micro 참조 커널과 같은 루프)를 쓰고, 층 정보는 그 함수 첫 줄의 `#pragma knpu`에 적는다. lcc의 mlir 드라이버가 이 C를 MLIR로 내리며 pragma를 함수 속성으로 넘긴다. 컴파일러 경로에 TensorFlow는 없다. | 같은 C를 gcc로 돌려 생성기를 정답값과 비교할 수 있다. C에서는 재양자화 같은 뜻이 산술로만 남으므로, 뜻은 pragma로 넘기고 `knpu-opt`는 산술을 알아보지 않는다. Arm Vela와 Apache TVM도 `.tflite`를 직접 파싱한다. |
 | D13 | 부트 체인 | 처음부터 TF-A(BL1, BL2, BL31)와 U-Boot(BL33)를 쓴다. SoC에는 EL3, 보안 부트 플래시, 보안 RAM이 있고, PSCI는 BL31이 제공한다. | Cortex-A SoC의 표준 Arm 부트 체인이다. EL3 펌웨어를 올리면 QEMU 내장 PSCI는 꺼진다(`hw/arm/virt.c`). |
 | D14 | 인터럽트 컨트롤러 | GICv3. | Cortex-A72 코어를 쓰는 메인라인 arm64 SoC `.dtsi` 26개 중 18개가 GICv3를 쓴다. ITS는 D3의 MSI 경로다. |
 | D15 | 커널 드라이버 프레임워크 | DRM accel 서브시스템, GEM DMA 헬퍼(물리적으로 연속인 버퍼, IOMMU 없음), 작업 큐와 타임아웃은 `drm_sched`. 참조 구현은 `drivers/accel/ethosu`다. | 메인라인 NPU 드라이버는 모두 DRM accel을 쓴다. Ethos-U가 D9, D10에 가장 가깝다. |
 | D16 | 저장소 구조 | Buildroot 외부 트리(`BR2_EXTERNAL`)를 둔 단일 저장소. 우리 코드는 일반 소스 파일로 두고, 업스트림 트리에 등록하는 부분(QEMU meson/Kconfig, U-Boot Kconfig)만 작은 연결 패치로 한다. Buildroot는 고정한 서브모듈이고, 나머지 업스트림 프로젝트는 Buildroot가 고정 버전으로 받아 온다. | 모든 층을 한곳에서 읽을 수 있다. |
-| D17 | LLVM/MLIR | apt.llvm.org의 MLIR 23.x(`libmlir-23-dev`, `mlir-23-tools`). | 최신 릴리스 계열(23.1.5)이다. TOSA는 릴리스마다 형태가 바뀌었으므로(`rounding_mode`가 21.1.8에서는 문자열, 22.1.8과 23.1.5에서는 enum) 메이저 버전을 고정한다. |
+| D17 | LLVM/MLIR | apt.llvm.org의 MLIR 23.x(`libmlir-23-dev`, `mlir-23-tools`). | 최신 릴리스 계열(23.1.5)이고, lcc의 mlir 드라이버도 LLVM 23(`/usr/lib/llvm-23/bin`)을 쓴다. 방언 형태는 릴리스마다 바뀌므로(TOSA의 `rounding_mode`가 21.1.8에서는 문자열, 22.1.8과 23.1.5에서는 enum) 메이저 버전을 고정한다. |
 | D18 | 라이선스 | 업스트림 트리 안에서는 각 업스트림의 관례를 따른다(12.4절). 그 밖의 것(컴파일러, 런타임, 데모, 시험, 도구)은 Apache-2.0 WITH LLVM-exception이고, 공유 장치 코어(D33)만 예외다. 모든 파일에 SPDX 식별자를 두고, 전문은 `LICENSES/`에 둔다. | 업스트림 제출 가능성을 남긴다. 컴파일러가 링크하는 MLIR도 같은 라이선스다. |
 | D19 | 언어 | README와 문서, 커밋 메시지는 한국어로 쓴다. 코드 주석은 영어로 쓴다. 식별자, SPDX, DT compatible 문자열, Kconfig 이름 같은 코드 자체는 영어다. | 주석은 QEMU, 리눅스, U-Boot, TF-A의 관행을 따른다. |
 | D20 | 이름 | 벤더 접두사 `kiwon`. SoC `kn1`(compatible `"kiwon,kn1"`, QEMU SoC 장치 `kiwon-kn1`). 보드 `kn1-evb`(compatible `"kiwon,kn1-evb"`, QEMU 머신 `kn1-evb`). NPU compatible `"kiwon,kn1-npu"`. 리눅스 드라이버 `knpu`. | QEMU 머신은 SoC를 장치로 품은 보드다(D25). |
@@ -69,7 +69,7 @@ QEMU ARMv8 `virt` 보드 위에 SystemC 가속기 모델, 리눅스 드라이버
 | D25 | 보드와 QEMU 구조 | 보드는 `kn1-evb`다. QEMU 코드는 SoC 장치(`kiwon-kn1`: CPU, GIC, UART, RTC, 워치독, GPIO, 보안 RAM, NPU)와 보드 머신(`kn1-evb`: DRAM, 부트 플래시, virtio-mmio 저장 장치, `gpio-pwr`)으로 나눈다. | QEMU가 실제 SoC 머신을 이렇게 만든다(`imx8mp-evk`는 `fsl-imx8mp`를, `raspi4b`는 `bcm2838`을 품는다). 이 나눔은 `kn1.dtsi`와 `kn1-evb.dts`의 나눔과 같다. `-evb`는 QEMU Arm 머신 10개와 리눅스 arm64 보드 파일 24개가 쓴다. |
 | D26 | DRAM | `0x4000_0000`부터 4 GiB(`0x1_3FFF_FFFF`까지)로 고정한다. 머신은 다른 `-m` 값을 거부한다. | 보드의 메모리는 고정이고, DT를 생성하지 않으므로 D4에 필요하다. QEMU `raspi` 머신도 다른 크기를 거부한다. 4 GiB를 넘는 메모리로 NPU의 64비트 주소와 드라이버의 DMA 마스크를 시험한다. |
 | D27 | 저장 장치 | 먼저 virtio-mmio 블록 장치를 쓰고, 나중에 실제 컨트롤러로 바꾼다(13절). | U-Boot와 리눅스가 제약 없이 지원한다. QEMU의 PL181 모델에는 DMA가 없고, SD 카드 모델은 이미지 크기를 제한한다. |
-| D28 | 데이터 레이아웃 | TFLite 레이아웃: 활성값은 NHWC int8, 합성곱 가중치는 OHWI int8, bias는 출력 채널마다 int32, 재양자화 표는 채널별로 둔다. | 임포터가 상수를 전치 없이 복사하고, TFLite Micro 참조 커널도 같은 방식으로 인덱싱한다. |
+| D28 | 데이터 레이아웃 | TFLite 레이아웃: 활성값은 NHWC int8, 합성곱 가중치는 OHWI int8, bias는 출력 채널마다 int32, 재양자화 표는 채널별로 둔다. | 생성기가 상수를 전치 없이 C 배열로 옮기고, TFLite Micro 참조 커널도 같은 방식으로 인덱싱한다. |
 | D29 | DMA 형태 | 1-D와 2-D 전송. 간격과 횟수는 DRAM 쪽에만 있고, SRAM 쪽은 연속이다. | 계획한 타일링(H 타일, 출력 채널 타일, 열 타일)에 충분하고, 양쪽 모두에 부호 있는 간격을 두는 Ethos-U의 3-D 전송보다 범위 검사가 단순하다. |
 | D30 | DRAM 범위 | 장치는 DRAM 범위를 검사하지 않고 커널 검증기가 검사한다. 레지스터 오프셋 `0x140`~`0x1FF`는 영역 크기 레지스터를 위해 비워 둔다. | Ethos-U에는 영역 베이스 레지스터만 있고, 버퍼 크기는 드라이버가 제출할 때 검사한다(`ethosu_job.c:490`). |
 | D31 | 이중 버퍼링 | DMA와 연산은 비동기이고, Ethos-U처럼 명시적인 대기 명령으로 순서를 맞춘다. 모델은 여전히 명령을 하나씩 실행하지만, 아직 기다리지 않은 연산이 쓰는 SRAM을 건드리는 명령이 오면 오류로 멈춘다. 컴파일러는 타일을 이중 버퍼링하고 추정 사이클 수를 보고한다. | 스케줄링과 SRAM 할당은 NPU 컴파일러의 핵심이다. 오류 규칙(Ethos-U에서 가져오지 않은 자체 규칙)은 대기 누락을 결정적으로 드러낸다. 추정치는 Vela의 `npu_performance.py`처럼, 시간 모델 없이 이득을 보여 준다(D1). |
@@ -79,7 +79,7 @@ QEMU ARMv8 `virt` 보드 위에 SystemC 가속기 모델, 리눅스 드라이버
 | D35 | 커널 설정 | 첫 부팅까지는 arm64 `defconfig`에 kn1 조각을 더해 쓰고, 그 뒤 최소 `kn1_defconfig`를 저장소에 둔다. | v7.3 arm64 `defconfig`는 SoC 플랫폼 52개와 옵션 약 1,900개를 켠다. 최소 설정은 kn1에 무엇이 필요한지 정확히 보여 준다. |
 | D36 | UAPI | Ethos-U 방식: 조회, 버퍼 생성, mmap 오프셋, 명령열 생성, 제출, 버퍼 대기(`drm_gem_dma_resv_wait()`처럼 기다리고, 실패한 작업은 `-EIO`로 알린다), perfmon 생성·해제·읽기. | 같은 종류의 장치를 다루는 메인라인 드라이버와 모양이 같다. |
 | D37 | 바인딩의 클록 | `clocks`는 필수다. `kn1.dtsi`가 고정 클록을 제공하고, 드라이버는 runtime PM으로 이를 켠다. | 메인라인 NPU 바인딩 두 개가 모두 `clocks`를 요구한다(`arm,ethos.yaml`, `rockchip,rk3588-rknn-core.yaml`). |
-| D38 | 컴파일러 구조 | MLIR standalone 예제의 구성을 따르고 모두 C++로 짠다. 도구는 `knpu-opt`(패스), `knpu-translate`(`knpu` 다이얼렉트에서 `model.knpu`로), `knpu-compile`(전체 파이프라인)이다. Python은 임포터에만 쓴다(D12). | MLIR의 트리 밖 예제(`mlir/examples/standalone`)와 같은 구성이다. |
+| D38 | 컴파일러 구조 | MLIR standalone 예제의 구성을 따르고 모두 C++로 짠다. 도구는 `knpu-opt`(패스), `knpu-translate`(`knpu` 다이얼렉트에서 `model.knpu`로), `knpu-compile`(lcc가 낸 `.mlir`에서 `model.knpu`까지)이다. Python은 생성기 `tflite2c`에만 쓴다(D12). | MLIR의 트리 밖 예제(`mlir/examples/standalone`)와 같은 구성이다. |
 | D39 | 모델 파일 | 자체 리틀 엔디언 컨테이너 `model.knpu`. | 런타임이 다른 라이브러리 없이 읽는다. |
 | D40 | 영역 역할 | Vela 관례를 따른다. 영역 0은 상수, 영역 1은 arena(입력, 출력, SRAM에서 내보낸 활성값)이고, 영역 2~7은 쓰지 않는다. | Vela와 같은 관례다(`BasePointerIndex`: 0 가중치, 1 스크래치 arena). |
 | D41 | 런타임 | Rust로 `libknpu` 크레이트와 `knpu-infer`를 만든다. Buildroot의 cargo 패키지 방식과 미리 빌드된 Rust 툴체인(`host-rust-bin`)으로 빌드한다. | 메모리 안전성. Buildroot에서 glibc를 쓰는 aarch64는 Rust tier 1 대상이다. |
@@ -96,14 +96,22 @@ QEMU ARMv8 `virt` 보드 위에 SystemC 가속기 모델, 리눅스 드라이버
 ```
  빌드 호스트 (x86_64)                         게스트: QEMU 안의 kn1-evb 보드 (AArch64)
  ---------------------------------------      ------------------------------------------
- model.tflite                                 knpu-infer (데모 앱, Rust)
-     |  tflite-import (Python)                    |  libknpu (런타임, Rust)
-     v                                            |  /dev/accel/accel0에 ioctl
- TOSA (MLIR 23)                                   v
-     |  knpu-compile (C++, MLIR 패스)         knpu.ko (DRM accel 드라이버)
-     v                                            |  명령열 검증,
- model.knpu ---- rootfs에 복사 ---------------->  |  영역 베이스, QBASE, START 기록
- (명령열, 상수, 메타데이터)                       v
+ model.tflite
+     |  tflite2c (Python)
+     v
+ model.c (C89, #pragma knpu)
+     |  lcc -S (mlir 드라이버)
+     v
+ model.mlir (MLIR 23)
+     |  knpu-compile (C++, MLIR 패스)
+     v                                        knpu-infer (데모 앱, Rust)
+ model.knpu ---- rootfs에 복사 ---------------->  |  libknpu (런타임, Rust)
+ (명령열, 상수, 메타데이터)                       |  /dev/accel/accel0에 ioctl
+                                                  v
+                                              knpu.ko (DRM accel 드라이버)
+                                                  |  명령열 검증,
+                                                  |  영역 베이스, QBASE, START 기록
+                                                  v
                                               kn1-npu (QEMU 장치 모델)
                                                   DMA <-> DRAM, SRAM 스크래치패드, IRQ
 
@@ -340,7 +348,8 @@ ReLU는 별도 연산이 아니다. 참조 커널처럼, 값을 만드는 연산
 | bias | 출력 채널마다 | int32 |
 | 재양자화 표 | 출력 채널마다 곱셈 계수와 시프트 | int32, int32 |
 
-TFLite 레이아웃을 그대로 쓰므로 임포터는 상수를 전치 없이 복사한다(D28).
+TFLite 레이아웃을 그대로 쓰므로 생성기는 상수를 전치 없이 C 배열로
+옮긴다(D28).
 
 ### 6.6 SRAM 스크래치패드
 
@@ -591,14 +600,15 @@ Ethos-U와 다른 점:
 
 ```
 model.tflite
-  -> tflite-import      (Python, flatbuffers, TFLite Micro의 schema.fbs)
-  -> TOSA               (MLIR 23)
-  -> knpu 다이얼렉트    (양자화 파라미터를 가진 conv / add / avgpool,
-                         softmax 같은 CPU 연산은 따로 둠)
+  -> tflite2c           (Python. 층마다 C89 함수와 #pragma knpu, 9.2절)
+  -> model.c            (C89. gcc로 빌드하면 TFLite Micro와 같은 결과)
+  -> lcc -S             (mlir 드라이버, -Wf-pragma=knpu. pragma는 함수 속성으로)
+  -> knpu-import        (pragma가 붙은 층 함수를 knpu 그래프 연산으로,
+                         상수 전역을 텐서 상수로)
   -> 타일링             (이중 버퍼링을 고려한 H 타일과 출력 채널 타일)
   -> SRAM 할당          (정적, 수명 기반, 미리 읽는 타일마다 버퍼 두 개)
-  -> 스케줄링           (현재 타일을 계산하는 동안 다음 타일을 DMA로 읽음,
-                         대기 명령 삽입)
+  -> 스케줄링           (현재 타일을 계산하는 동안 다음 타일을 DMA로 읽음)
+  -> 대기 명령 삽입     (명세 9절의 큐 규칙에서 충돌하는 곳에만)
   -> 사이클 추정        (DMA와 연산의 해석적 모델)
   -> knpu-translate     (명령열 + 상수 -> model.knpu)
 ```
@@ -607,32 +617,143 @@ model.tflite
 때문이다(D1). Vela의 `npu_performance.py`처럼 스케줄을 비교하는 데 쓴다.
 이중 버퍼링이 있을 때와 없을 때, 그리고 SRAM 크기가 다를 때를 비교한다.
 
-### 9.2 임포터
+softmax처럼 NPU에서 돌지 않는 연산은 같은 C89를 lcc-opt로 최적화해 aarch64
+코드로 내린다. M2에서 구현한다(13절 6번).
 
-두 데모 모델의 연산자 `CONV_2D`, `FULLY_CONNECTED`, `ADD`,
-`AVERAGE_POOL_2D`, `RESHAPE`, `SOFTMAX`를 지원한다(D12). 재양자화는 채널별
-`multiplier`, `shift`와 반올림 방식(`SINGLE_ROUND` 또는 `DOUBLE_ROUND`)을
-가진 `tosa.rescale`이 된다.
+### 9.2 생성기 `tflite2c`
 
-### 9.3 구현
+`.tflite`를 TFLite Micro의 Python 스키마(`schema_py_generated.py`, flatc가
+만든 것)와 PyPI `flatbuffers`로 읽는다. 두 데모 모델의 연산자 `CONV_2D`,
+`FULLY_CONNECTED`, `ADD`, `AVERAGE_POOL_2D`, `RESHAPE`, `SOFTMAX`를
+다룬다(D12).
+
+- 층마다 매개변수가 없는 `static void` 함수 하나를 쓴다. 본문은 TFLite Micro
+  참조 커널과 같은 C89 루프이고, 첫 줄은 그 층의 `#pragma knpu`다(9.3절).
+- 상수(가중치, bias, 곱셈 계수, 시프트)는 초기값이 있는 `static const`
+  배열로, 활성값은 `const`가 아닌 파일 범위 배열로 쓴다. 원소 순서는 TFLite
+  그대로다(D28).
+- 곱셈 계수와 시프트는 TFLite Micro의 식(`PopulateConvolutionQuantizationParams`,
+  `QuantizeMultiplier`)을 반올림 방식마다 그대로 옮겨 계산한다. 시프트가
+  30을 넘으면 단일 반올림 빌드만 값을 포화시키기 때문이다.
+- 시험용으로 입력을 읽어 모델 함수를 부르고 출력을 쓰는 `main` 파일을 따로
+  쓴다. 같은 C를 `gcc -std=c89 -pedantic-errors`로 빌드한 결과는 V2와 같아야
+  한다.
+
+### 9.3 C89 규약과 `#pragma knpu`
+
+생성기는 lcc가 받는 C89만 쓴다. 층 함수와 모델 함수는 다음 모양이다.
+
+```c
+static void layer1(void)
+{
+#pragma knpu conv2d in=act0 out=act1 w=L1_W bias=L1_B mult=L1_M shift=L1_S in_shape=(14,14,8) out_shape=(14,14,16) kernel=(3,3) stride=(1,1) pad=(1,1,1,1) in_zp=-128 out_zp=-5 clamp=(-5,127)
+	int oy, ox, oc, ky, kx, ic;
+	/* TFLite Micro ConvPerChannel과 같은 루프 */
+}
+
+void knpu_model(void)
+{
+#pragma knpu model in=act0 out=act1 in_scale=ACT0_SCALE in_zp=-128 out_scale=ACT1_SCALE out_zp=-5 round="double"
+	layer1();
+}
+```
+
+- **문법:** `#pragma knpu <연산> <키>=<값> ...`. 값은 그 자리에서 보이는 파일
+  범위 객체의 이름, 정수(10진이나 16진, 부호 가능), 정수 목록 `(a,b,...)`,
+  문자열 중 하나다. 실수는 쓰지 않고, 매크로는 펼쳐지지 않는다.
+- **자리:** 함수 본문을 여는 `{` 다음 줄, 지역 선언 앞. 한 함수에 하나.
+- **lcc가 하는 일:** `-Wf-pragma=knpu`로 켜면 그 함수에 속성 `knpu.op`(문자열)와
+  `knpu.args`(딕셔너리)를 단다. 이름은 심볼 참조, 정수는 `i64`, 목록은
+  `array<i64: ...>`, 문자열은 문자열 속성이 된다. 가리킨 객체는 쓰인 것으로
+  세므로 본문에서 쓰지 않는 상수 배열도 남는다. lcc는 `knpu`의 뜻을 모르고,
+  연산과 키의 뜻은 이 저장소가 정한다.
+- **gcc:** 모르는 pragma를 무시하므로(`-Wno-unknown-pragmas`) 같은 파일로
+  정답값을 확인한다.
+- **형:** int8은 `signed char`, int32는 `int`, 64비트 중간값은 `long`이다(LP64.
+  aarch64와 x86_64). 실수 스케일은 `static const float` 전역에 두고 이름으로
+  가리킨다.
+- **바이트:** lcc는 초기값이 있는 전역을 원소형 없는 바이트 문자열(대상
+  엔디언)로 낸다. `knpu-import`는 키가 정한 원소형으로 이를 다시 읽는다.
+- **파일:** 줄 끝은 LF만 쓰고, 빈 `#pragma` 줄은 쓰지 않는다.
+
+| 연산 | 키 | 값 |
+|------|----|----|
+| `conv2d` | `in`, `out` | 입력, 출력 활성값(`signed char`, NHWC) |
+| | `w` | 가중치(`signed char`, OHWI) |
+| | `bias`, `mult`, `shift` | 출력 채널마다 bias, 곱셈 계수, 시프트(`int`) |
+| | `in_shape`, `out_shape` | (H, W, C) |
+| | `kernel`, `stride` | (KH, KW), (SH, SW) |
+| | `pad` | (위, 왼쪽, 아래, 오른쪽). `SET_PAD`와 같은 순서 |
+| | `in_zp`, `out_zp` | 입력, 출력 영점 |
+| | `clamp` | (최소, 최대) |
+| `model` | `in`, `out` | 모델 입력, 출력 배열 |
+| | `in_scale`, `out_scale` | `static const float` 전역 |
+| | `in_zp`, `out_zp` | 모델 입력, 출력 영점 |
+| | `round` | `"double"` 또는 `"single"`(D11) |
+
+- `model`은 파일에 하나이고, 본문은 층 함수 호출을 차례로 둔다. 반올림 방식은
+  TFLite Micro에서 빌드 전체의 설정이므로 층이 아니라 모델에 둔다.
+- `knpu-import`는 키가 빠지거나 남는지, 배열 크기가 모양 × 원소 크기와
+  같은지, 명세 6.4절의 모양 조건, 모델 입출력의 영점이 층의 영점과 같은지를
+  검사한다.
+- 곱셈 계수와 시프트를 따로 둔 것은 TFLite Micro의 채널별 배열과 같게 하려는
+  것이다. 이를 SRAM의 재양자화 표(채널마다 8바이트)로 엮는 일은 컴파일러가
+  한다.
+- 다른 연산(`add`, `avgpool` 등)과 그 키는 M2에서 더한다.
+
+### 9.4 구현
 
 MLIR의 `mlir/examples/standalone`과 같은 구성을 가진 트리 밖 MLIR
 프로젝트다(D38). CMake에서 apt.llvm.org 패키지(`/usr/lib/llvm-23`)를 대상으로
-`find_package(MLIR REQUIRED CONFIG)`를 쓰고, `include/`, `lib/`, `test/`
-디렉터리를 둔다. 도구는 다음과 같다.
+`find_package(MLIR REQUIRED CONFIG)`를 쓰고, `include/`, `lib/`, `tools/`,
+`test/` 디렉터리를 둔다.
+
+방언 `knpu` 하나에 두 층의 연산을 둔다.
+
+- 그래프 연산(`knpu.conv2d`. 나중에 `add`, `avgpool`): 텐서 값을 받고 낸다.
+  `knpu-import`가 만든 `func.func @knpu_model(%in: tensor<...>) -> tensor<...>`
+  안에 놓이고, 상수는 `arith.constant dense<...>`다. 검증기는 명세 6.4절의
+  모양 조건을 본다.
+- 명령 연산(`knpu.dma`, `knpu.conv`, `knpu.dma_wait`, `knpu.kernel_wait`,
+  `knpu.stop`): 명세의 OP·대기 명령과 거의 1:1이고, SET 명령의 값은 연산의
+  속성이다. 검증기는 SRAM 범위와 정렬을 본다.
+
+| 패스 | 하는 일 |
+|------|---------|
+| `knpu-import` | pragma가 붙은 함수를 그래프 연산으로 바꾼다. 상수 전역은 원소형을 되살려 텐서 상수로 만들고, 재양자화 표는 채널마다 (곱셈 계수, 시프트)로 엮는다. 바꾼 층 함수, `knpu.*` 속성, 더 쓰이지 않는 전역을 지운다. |
+| `knpu-tile` | `sram-size`와 이중 버퍼링을 고려해 타일 크기(출력 H, 출력 채널)를 정하고, 층을 타일로 나눈다(`tensor.extract_slice`, 타일별 pad, `tensor.insert_slice`). 상수는 SRAM에 상주한다. |
+| `knpu-schedule` | arena 배치(입력, 출력)와 SRAM 배치(상수, 입출력 버퍼 두 벌씩)를 정하고 명령 연산으로 낮춘다. 다음 타일의 입력 DMA를 현재 타일의 연산 앞에 둔다. |
+| `knpu-insert-waits` | 명세 9절의 큐 규칙(큐 깊이 2, 암묵 대기, 반대쪽 큐와의 SRAM 겹침)을 따라가며 충돌하는 곳에만 대기 명령을 넣는다. Vela의 대기 계산과 같은 방식이다. |
+
+도구는 다음과 같다.
 
 - `knpu-opt`: 패스를 실행한다. `lit`와 `FileCheck` 시험이 쓴다.
-- `knpu-translate`: `knpu` 다이얼렉트에서 `model.knpu`를 낸다.
-- `knpu-compile`: 전체 파이프라인을 실행한다.
+- `knpu-translate`: 명령 연산에서 `model.knpu`를 낸다. 바뀐 SET 값만 명령으로
+  쓰고, 명령 번호는 `hw/npu-core/knpu_cmd.h`(MIT)를 그대로 include한다.
+- `knpu-compile`: lcc가 낸 `.mlir`을 받아 패스와 번역을 한 번에 실행한다.
 
-임포터 다음의 모든 단계는 C++다.
+lcc는 저장소에 넣지 않는다(12.4절). `compiler/` CMake가 고정 태그의 릴리스
+압축을 sha256으로 확인하며 내려받는다. 게스트가 AArch64이므로 aarch64용 mlir
+드라이버(x86_64에서 돈다)를 쓴다. 생성기 다음 단계 중 이 저장소의 것은 모두
+C++다.
 
-### 9.4 모델 파일 `model.knpu`
+### 9.5 모델 파일 `model.knpu`
 
-리틀 엔디언 컨테이너다(D39). 헤더(매직, 버전, 대상 SRAM 크기)와 다음
-섹션으로 이루어진다: 명령열, 상수(가중치, bias, 재양자화 표), 영역 표(영역마다
-크기와 역할), 입출력 텐서 설명(모양, 스케일, zero point, arena 안의 오프셋),
-CPU 후처리 연산.
+리틀 엔디언 컨테이너다(D39). v0의 구성은 다음과 같고, 비트 단위 정의는
+[model-format.md](model-format.md)에 있다.
+
+| 부분 | 내용 |
+|------|------|
+| 헤더(32 B) | 매직 `"KNPU"`, 형식 버전, 대상 SRAM 크기, 명세 `VERSION.MAJOR`, 섹션 수, 섹션 표 위치 |
+| 섹션 표 | 섹션마다 종류, 오프셋, 크기 |
+| `CMDS` | 명령열. 크기가 곧 `QSIZE`다 |
+| `REGIONS` | 영역마다 번호, 역할, 크기, 내용 섹션 |
+| `CONST` | 영역 0의 내용(가중치, bias, 재양자화 표) |
+| `TENSORS` | 입출력마다 방향, 영역, 오프셋, 형, 모양(NHWC), 스케일, 영점 |
+
+섹션은 16바이트 경계에 둔다. 장치의 `SRAM_SIZE`가 대상 SRAM 크기보다 작으면
+런타임은 모델을 거부한다. CPU 후처리 연산의 섹션은 M2에서 minor 버전을 올려
+더한다.
 
 영역 역할은 Vela를 따른다(D40). 0은 상수, 1은 arena(파일에 적힌 오프셋에
 입력, 출력, SRAM에서 내보낸 활성값을 둔다), 2~7은 쓰지 않는다. 런타임은
@@ -687,7 +808,7 @@ qemu-npu-soc/
 ├── firmware/tf-a/   TF-A 플랫폼 포트(plat/kiwon/kn1)
 ├── firmware/u-boot/ U-Boot 보드 포트, 연결 패치
 ├── linux/           knpu 드라이버(트리 밖 모듈), SoC .dtsi / 보드 .dts, 바인딩 YAML
-├── compiler/        TFLite 임포터(Python), MLIR 다이얼렉트·패스·도구(C++)
+├── compiler/        생성기 tflite2c(Python), MLIR 다이얼렉트·패스·도구(C++)
 ├── runtime/         libknpu와 knpu-infer(Rust)
 ├── br2-external/    Buildroot 외부 트리(defconfig, 커널 설정, 패키지, 패치)
 ├── buildroot/       Buildroot 서브모듈(고정)
@@ -713,6 +834,11 @@ qemu-npu-soc/
 
 대상 툴체인: Buildroot 내부 툴체인(GCC, glibc)(D44).
 
+컴파일러와 그 시험이 빌드할 때 받는 것(압축과 파일은 모두 sha256으로
+확인): lcc `v4.2-llvm.3`의 aarch64 mlir 드라이버, TFLite Micro
+`fd2a85d`(소스와 Python 스키마), flatbuffers v25.9.23(C++ 소스). 생성기가
+쓰는 PyPI `flatbuffers`도 25.9.23으로 고정한다.
+
 ### 12.3 연결 패치
 
 연결 패치(glue patch)는 되도록 작게, 등록에 필요한 것만 둔다.
@@ -737,8 +863,14 @@ qemu-npu-soc/
 | `br2-external/` | GPL-2.0-or-later. 패치는 대상 프로젝트를 따른다 | Buildroot `COPYING`. |
 | 그 밖의 모든 것 | Apache-2.0 WITH LLVM-exception | D18. |
 
-외부에서 가져온 입력은 원래 라이선스를 유지한다: MLPerf Tiny 모델(Apache-2.0),
-TFLite `schema.fbs`(Apache-2.0).
+외부에서 가져온 입력은 원래 라이선스를 유지한다: MLPerf Tiny
+모델(Apache-2.0), TFLite `schema.fbs`와 빌드할 때 받는 TFLite Micro
+소스(Apache-2.0), flatbuffers(Apache-2.0).
+
+lcc는 저장소에 넣지 않고 빌드할 때 내려받는다(9.4절). lcc의
+라이선스(`CPYRIGHT`)는 그 파일과 함께 재배포하는 것은 허락하지만, lcc나
+lcc가 가치의 큰 부분을 차지하는 제품을 파는 것은 금지한다. 이 저장소의 다른
+부분과 조건이 다르므로 저장소의 파일과 섞지 않는다.
 
 ---
 
@@ -757,6 +889,13 @@ TFLite `schema.fbs`(Apache-2.0).
    `drm_sched`는 프롬프트가 없는 심볼이다. 이를 select하는 드라이버 하나를
    켜 두거나(예: `CONFIG_DRM_ACCEL_ARM_ETHOSU=m`) 리눅스 연결 패치를 둬야
    한다(8.1절).
+6. 확정됨(2026-11-22): softmax처럼 NPU에서 돌지 않는 연산은 같은 C89를
+   lcc_llvm의 lcc-opt(Apache-2.0 WITH LLVM-exception)로 affine·linalg로 올려
+   최적화한 뒤 aarch64 코드로 내린다. M2에서 구현하며, lcc-opt를 받는
+   방법(소스 빌드, 고정 커밋)과 `model.knpu`의 CPU 섹션 형식은 그때 정한다.
+   lcc-opt의 `lcc-globals-to-memref`는 함수 속성 안에서 가리키는 전역을
+   memref로 바꾸지 않으므로, lcc-opt에는 `knpu-import`가 층 함수와
+   `knpu.*` 속성을 지운 모듈을 넘긴다(9.4절).
 
 ---
 
@@ -772,15 +911,15 @@ TFLite `schema.fbs`(Apache-2.0).
 | TF-A | master `2fbca70`(2026-11-03), 릴리스 v2.15.0 | `plat/qemu`(`platform_def.h`: 클러스터 20-41, 보안 메모리 80-90, 보안 GPIO 92-95; `qemu_pm.c:217-253`; `qemu_bl2_setup.c`의 DT 수정과 `TRANSFER_LIST`); `platform.mk:17`, 159-160; `plat_helpers.mk:18-39`; `drivers/arm/pl061/pl061_gpio.c`; Rockchip `params_setup.c`(`poweroff_gpio`)와 `rk3399/drivers/soc/soc.c:342`; `imx8m_psci_common.c:163`; BSD-3-Clause 기여 규칙 |
 | Buildroot | master `f03de2f`(2026-11-02), 릴리스 2026.08.1 | `BR2_LINUX_KERNEL_CUSTOM_DTS_PATH`(`linux/Config.in:502`)와 설정 방식(228-267); `BR2_TARGET_UBOOT_CUSTOM_DTS_PATH`(`boot/uboot/Config.in:824`); Bootlin 외부 툴체인(`toolchain-external-bootlin`); Rust(`package/rustc/Config.in.host`, `package/pkg-cargo.mk`); `BR2_GLOBAL_PATCH_DIR`; 호스트 QEMU; TF-A 옵션; 커널 모듈 방식; `BR2_EXTERNAL` 매뉴얼 |
 | Buildroot 릴리스 | buildroot.org 내려받기 페이지(2026-11-05 조회) | 2026.08.1 안정판(지원 종료 2026년 12월); 2025.02.19 LTS(지원 종료 2028년 3월) |
-| TFLite Micro | `fd2a85d`(2026-11-04) | 참조 커널(`conv.h:54-131`); 반올림 구현(`common.cc:31-113`); `schema.fbs`; int8 `ConvPerChannel`, `FullyConnected`, `AddFunc`, `AveragePool`과 고정소수점 보조 함수(행 번호는 `docs/npu-spec.md` 13절) |
+| TFLite Micro | `fd2a85d`(2026-11-04) | 참조 커널(`conv.h:54-131`); 반올림 구현(`common.cc:31-113`); `schema.fbs`; int8 `ConvPerChannel`, `FullyConnected`, `AddFunc`, `AveragePool`과 고정소수점 보조 함수(행 번호는 `docs/npu-spec.md` 13절); CMake 빌드(`CMakeLists.txt`, `cmake/generated/tflm_sources.cmake`)와 flatbuffers 고정(`MODULE.bazel`의 v25.9.23); Python 스키마(`tensorflow/lite/micro/python/schema_py_generated.py`); 합성곱 양자화 파라미터와 clamp(`tensorflow/lite/micro/kernels/kernel_util.cc:60-90`, 369-445), `QuantizeMultiplier`(`tensorflow/lite/micro/kernels/internal/quantization_util.cc:54-104`) |
+| PyPI | `flatbuffers` 25.9.23(2026-11-22 조회) | 생성기의 `.tflite` 읽기. Apache-2.0 |
+| lcc_llvm | 태그 `v4.2-llvm.3`(커밋 `3619447`, 2026-11-22) | `#pragma`의 문법, 자리, 속성 모양(README의 "#pragma를 MLIR 함수 속성으로" 절, `src/pragma.c`, `tst/pragma/`); mlir 드라이버의 LLVM 23(README "필요한 것"); 초기값이 있는 전역의 바이트 문자열 출력과 `long`의 i64(aarch64 mlir 드라이버로 내려 확인); lcc-opt가 함수 속성 안에서 가리키는 전역을 바꾸지 않음(`lcc-opt/README.md:263`, `lcc-opt/test/pragma-attrs.mlir`); `CPYRIGHT`; 릴리스 압축의 sha256 |
 | LiteRT | 양자화 규격(developers.google.com/edge/litert/models/quantization_spec, 2026-11-05 조회) | D6 |
 | MLPerf Tiny | `4addd0f`(2026-07-13) | ResNet-8 정의(`keras_model.py`, 35행의 "200k params"), int8 `.tflite` 파일, Apache-2.0 |
 | llvm-project | main `da1fdef`(24.0.0, 2026-11-05), 태그 `llvmorg-22.1.8`, `llvmorg-23.1.5` | `tosa.rescale`(`TosaOps.td:2651`), 반올림 enum(`TosaOpBase.td:397-403`); `ConvertConv2DToImg2Col.cpp`; 설치된 21.1.8은 문자열 속성을 씀(`TosaTypesBase.td:256-258`); `mlir/examples/standalone`(`CMakeLists.txt`, `standalone-opt`, `standalone-translate`) |
-| apt.llvm.org | noble, `libmlir-23-dev` 23.1.6 스냅숏(2026-11-03 빌드) | D17 |
+| apt.llvm.org | noble, `libmlir-23-dev` 23.1.6 스냅숏(2026-11-16 빌드, `5b10d2d`) | D17; lcc 출력을 `mlir-opt`로 읽어 확인 |
 | Mesa | main `3df8fc4`(2026-11-05) | Ethos-U 반올림 방식(`ethosu_ml.h:98-100`); Teflon 장치 목록(`tfl_device.c:1649-1671`) |
-| TensorFlow | master `0e10898`(2026-11-04) | `tflite_to_tosa_bytecode`(`mlir.py:181`); 고정된 LLVM 커밋(`third_party/xla/third_party/llvm/workspace.bzl:22`) |
 | Arm Vela | `4e52413`(2026-11-04) | 자체 `tflite_reader.py`; 의존성 `flatbuffers`, `numpy`; `BasePointerIndex`(`high_level_command_to_npu_op.py:80-83`); NHCWB16 사용; `.tflite`와 `.npz` 출력(`vela.py:95-100`, `tflite_writer.py:198`); 대기 명령(`register_command_stream_generator.py:213-216`, 641-646); 명령 번호 공간(`ethos_u55_regs.py:574-673`); 진행 중 작업 수와 암묵 대기(`architecture_features.py:282-290`, 350, `register_command_stream_util.py:354-395`); 사이클 추정(`npu_performance.py`) |
-| IREE | `cbde0b0`(2026-11-04) | `iree-import-tflite`가 TensorFlow를 씀; TFLite 안내서의 TOSA 불안정 경고 |
 | Apache TVM | `cbb1e12`(2026-11-03) | `relax/frontend/tflite`가 `tflite` 패키지로 flatbuffer를 파싱 |
 | FSF | 라이선스 목록(gnu.org/licenses/license-list.html, 2026-11-05 조회) | Apache-2.0은 GPLv3와 호환되고 GPLv2와는 호환되지 않음; Expat(MIT)은 GPL과 호환 |
 | GitHub Actions | docs.github.com 과금·제한 페이지(2026-11-05 조회) | 공개 저장소의 표준 러너는 무료; 작업당 6시간; 저장소당 캐시 10 GB |

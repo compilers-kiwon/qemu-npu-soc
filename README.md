@@ -5,8 +5,9 @@
 
 가상 SoC `kn1`과 보드 `kn1-evb`를 QEMU에 만들고, 그 위에 TF-A, U-Boot,
 리눅스, NPU 드라이버, 모델 컴파일러, 런타임까지 한 저장소에서 올린다.
-SoC에는 int8 합성곱 NPU `kn1-npu`가 있다. TFLite 모델을 MLIR로 컴파일해
-이 NPU에서 돌리고, 결과를 TFLite Micro 참조 구현과 비트 단위로 비교한다.
+SoC에는 int8 합성곱 NPU `kn1-npu`가 있다. TFLite 모델을 C89로 옮겨 lcc와
+MLIR로 컴파일해 이 NPU에서 돌리고, 결과를 TFLite Micro 참조 구현과 비트
+단위로 비교한다.
 
 - 설계: [docs/design.md](docs/design.md)
 - 구현 순서: [docs/plan.md](docs/plan.md)
@@ -23,7 +24,7 @@ SoC에는 int8 합성곱 NPU `kn1-npu`가 있다. TFLite 모델을 MLIR로 컴�
 | `firmware/tf-a/` | TF-A 플랫폼 포트(`plat/kiwon/kn1`) |
 | `firmware/u-boot/` | U-Boot 보드 포트, 연결 패치 |
 | `linux/` | `knpu` 드라이버, SoC `.dtsi`와 보드 `.dts`, 바인딩 YAML |
-| `compiler/` | TFLite 임포터(Python), MLIR 다이얼렉트·패스·도구(C++) |
+| `compiler/` | 생성기 `tflite2c`(Python), MLIR 다이얼렉트·패스·도구(C++) |
 | `runtime/` | `libknpu`와 `knpu-infer`(Rust) |
 | `br2-external/` | Buildroot 외부 트리(defconfig, 커널 설정, 패키지, 패치) |
 | `buildroot/` | Buildroot 서브모듈(고정) |
@@ -41,6 +42,11 @@ SoC에는 int8 합성곱 NPU `kn1-npu`가 있다. TFLite 모델을 MLIR로 컴�
 | Buildroot | 2026.08.1 | 서브모듈 |
 | LLVM/MLIR | 23.x | 호스트의 apt.llvm.org 패키지 |
 | Rust | Buildroot 2026.08.1에 들어 있는 버전 | Buildroot |
+
+컴파일러와 그 시험이 빌드할 때 받는 것(모두 SHA-256 검사): lcc
+`v4.2-llvm.3`의 aarch64 mlir 드라이버, TensorFlow Lite Micro
+`fd2a85d`(소스와 Python 스키마), FlatBuffers v25.9.23(C++ 소스). 생성기가
+쓰는 PyPI `flatbuffers`도 25.9.23으로 고정한다.
 
 ## 요구 사항
 
@@ -171,18 +177,66 @@ runtime PM을 확인한다.
 python3 tests/driver/kn1_v5_test.py
 ```
 
+## 모델 컴파일러
+
+`compiler/`는 모델 컴파일러다(설계 9절). 생성기 `tflite2c`가 `.tflite`를
+C89로 옮기고, 층 정보는 층 함수 첫 줄의 `#pragma knpu`에 적는다. lcc가 이
+C를 MLIR로 내리면, `knpu-compile`이 MLIR 패스(가져오기, 타일링, 스케줄링,
+대기 명령 삽입)를 거쳐 `model.knpu`([형식](docs/model-format.md))를 쓴다.
+지금은 합성곱 층만 다룬다.
+
+apt.llvm.org의 LLVM 23 패키지(`libmlir-23-dev`, `mlir-23-tools`,
+`llvm-23-dev`, `llvm-23-tools`), CMake, Ninja, Python 3과 PyPI
+`flatbuffers` 25.9.23이 필요하다. 구성 단계에서 lcc 릴리스 압축(x86_64에서
+도는 aarch64용 mlir 드라이버), TensorFlow Lite Micro와 FlatBuffers 소스,
+TFLite Python 스키마를 내려받아 SHA-256을 검사한다. lcc는 라이선스 때문에
+저장소에 넣지 않는다(설계 12.4절).
+
+```bash
+python3 -m venv ~/py-venv && ~/py-venv/bin/pip install flatbuffers==25.9.23
+cmake -S compiler -B build/compiler -G Ninja \
+      -DMLIR_DIR=/usr/lib/llvm-23/lib/cmake/mlir \
+      -DPython3_EXECUTABLE=$HOME/py-venv/bin/python3
+cmake --build build/compiler
+ctest --test-dir build/compiler --output-on-failure
+```
+
+- V4: `compiler/test/`의 lit 시험. 방언 검증기, 패스마다의 결과와 오류,
+  명세 12절 예시와 워드 단위로 같은 명령열, 실제 lcc 출력 하나를 다룬다.
+- V2, V3: `tests/compiler/`. 시험 모델 `models/conv/conv.tflite`(14x14x8
+  입력, 3x3 합성곱, 출력 16채널)를 두 반올림 방식으로 다룬다. TensorFlow
+  Lite Micro 인터프리터가 정답값을 만들고, 생성기가 쓴 C를 gcc로 돌린
+  결과와, SRAM 64 KiB(타일 하나)와 4 KiB(타일 여럿, 이중 버퍼링)로
+  컴파일한 `model.knpu`를 공유 코어에서 돌린 결과를 비교한다. 대기 명령을
+  빼고 컴파일하면 동기화 오류로 멈추는지도 본다.
+
+모델 하나를 직접 컴파일하는 순서는 다음과 같다. `--round`는 대상의 반올림
+방식이다.
+
+```bash
+L=build/compiler/deps/lcc-v4.2-llvm.3-mlir-aarch64-linux
+~/py-venv/bin/python3 compiler/tflite2c/tflite2c.py \
+    --schema build/compiler/deps/schema_py_generated.py --round double \
+    models/conv/conv.tflite -o conv.c
+LCCDIR=$L $L/lcc -Wf-pragma=knpu -S conv.c -o conv.mlir
+build/compiler/bin/knpu-compile --sram-size=65536 conv.mlir -o conv.knpu
+```
+
+시험 모델은 `models/conv/make_model.py`가 TensorFlow 2.21.0으로 만든 것이다.
+CI와 컴파일러에는 TensorFlow가 필요 없다.
+
 ## CI
 
 GitHub Actions에서는 push마다 defconfig, `check-package`, `reuse lint`,
-NPU 공유 코어 시험(V2, V3), 바인딩과 디바이스 트리의 스키마 검사를
-돌리고(`ci.yml`), 매일 밤과 수동 실행 때 전체 빌드, 부팅 시험, V1, V5를
-돌린다(`nightly.yml`).
+NPU 공유 코어 시험(V2, V3), 모델 컴파일러 시험(V2~V4), 바인딩과 디바이스
+트리의 스키마 검사를 돌리고(`ci.yml`), 매일 밤과 수동 실행 때 전체 빌드,
+부팅 시험, V1, V5를 돌린다(`nightly.yml`).
 
 ## 현재 상태
 
 | 마일스톤 | 목표 | 상태 |
 |----------|------|------|
-| M1 | 합성곱 하나를 모든 층에 관통시킨다 | 진행 중. M1.1 저장소 뼈대, M1.2 펌웨어 체인 부팅(QEMU 머신, 디바이스 트리, TF-A, U-Boot, 리눅스 셸), M1.3 NPU 명세 v0([docs/npu-spec.md](docs/npu-spec.md)), M1.4 NPU 공유 코어와 정답값 비교(V2, V3), M1.5 QEMU NPU 장치(V1), M1.6 `knpu` 드라이버(V5)까지 끝났다 |
+| M1 | 합성곱 하나를 모든 층에 관통시킨다 | 진행 중. M1.1 저장소 뼈대, M1.2 펌웨어 체인 부팅(QEMU 머신, 디바이스 트리, TF-A, U-Boot, 리눅스 셸), M1.3 NPU 명세 v0([docs/npu-spec.md](docs/npu-spec.md)), M1.4 NPU 공유 코어와 정답값 비교(V2, V3), M1.5 QEMU NPU 장치(V1), M1.6 `knpu` 드라이버(V5), M1.7 모델 컴파일러 최소 경로(V2~V4)까지 끝났다 |
 | M2 | MNIST CNN | 시작 전 |
 | M3 | MLPerf Tiny ResNet-8 | 시작 전 |
 | M4 | 마무리: 새로 받은 저장소에서 README만으로 빌드와 데모 | 시작 전 |
@@ -208,4 +262,5 @@ Apache-2.0 WITH LLVM-exception이다(설계 D18, 12.4절).
 모든 파일에 SPDX 식별자를 두고, 전문은 `LICENSES/`에 둔다. 머리글을 둘 수
 없는 파일은 `REUSE.toml`에 선언한다. 저장소는 [REUSE](https://reuse.software)
 규격 3.3을 따르고, CI가 `reuse lint`로 검사한다. 라이선스 전문은 해당
-라이선스를 쓰는 코드가 생길 때 추가한다.
+라이선스를 쓰는 코드가 생길 때 추가한다. 빌드할 때 내려받는 lcc는 저장소에
+넣지 않으며 lcc의 라이선스(`CPYRIGHT`)를 따른다(설계 12.4절).
