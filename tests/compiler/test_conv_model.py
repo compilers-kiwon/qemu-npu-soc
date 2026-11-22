@@ -15,11 +15,15 @@ For both rounding modes:
    the counters must match the model, independently of tiling.
 3. The streams contain wait commands; compiled without them
    (--insert-waits=false) the device stops with a synchronization error.
+4. With --vectors, the committed test vectors of V6 (models/conv/vectors/:
+   the four models, five inputs and their V2 outputs per rounding mode) must
+   equal what this run makes; --update-vectors writes them instead.
 
 Inputs: seeded random bytes plus all -128 and all 127.
 """
 
 import argparse
+import glob
 import os
 import random
 import subprocess
@@ -38,6 +42,11 @@ OP_DMA_WAIT, OP_KERNEL_WAIT, OP_CONV = 0x0011, 0x0012, 0x0002
 H, W, IC, OC, K = 14, 14, 8, 16, 3
 MACS = H * W * OC * K * K * IC   # nominal MACs, SAME padding
 OUT_BYTES = H * W * OC
+
+# Inputs that go into the test vectors: the first three random ones (0 and 2
+# give different outputs in the two rounding modes) and the two edge cases
+VECTOR_INPUTS = (0, 1, 2, 8, 9)
+SRAM_NAMES = {65536: "64k", 4096: "4k"}
 
 
 class Checker:
@@ -97,13 +106,38 @@ def run_npu(args, model, inp, work, tag):
     return result, data
 
 
+def check_vectors(c, directory, vectors, update):
+    """Compares (or with update writes) the test vectors in directory."""
+    if update:
+        os.makedirs(directory, exist_ok=True)
+        for name, data in vectors.items():
+            write(os.path.join(directory, name), data)
+        print(f"wrote {len(vectors)} test vectors to {directory}")
+        return
+    hint = "(make them again with --update-vectors)"
+    for name, data in sorted(vectors.items()):
+        path = os.path.join(directory, name)
+        c.check(os.path.exists(path) and read(path) == data,
+                f"test vector {name} differs from this run {hint}")
+    present = {os.path.basename(p) for p in
+               glob.glob(os.path.join(directory, "*.knpu")) +
+               glob.glob(os.path.join(directory, "*.bin"))}
+    for name in sorted(present - vectors.keys()):
+        c.check(False, f"test vector {name} is not made any more {hint}")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     for opt in ("model", "tflite2c", "schema", "lcc-dir", "cc",
                 "knpu-compile", "knpu-run", "tflm-double", "tflm-single",
                 "work-dir"):
         ap.add_argument(f"--{opt}", required=True)
+    ap.add_argument("--vectors", help="directory of the V6 test vectors")
+    ap.add_argument("--update-vectors", action="store_true",
+                    help="write the test vectors instead of comparing")
     args = ap.parse_args()
+    if args.update_vectors and not args.vectors:
+        ap.error("--update-vectors needs --vectors")
     work = args.work_dir
     os.makedirs(work, exist_ok=True)
     c = Checker()
@@ -113,6 +147,8 @@ def main():
     inputs = [bytes(rng.randrange(256) for _ in range(n_in))
               for _ in range(8)]
     inputs += [bytes([0x80]) * n_in, bytes([0x7F]) * n_in]
+    vectors = {f"input-{n}.bin": inputs[i]
+               for n, i in enumerate(VECTOR_INPUTS)}
 
     lcc = os.path.join(args.lcc_dir, "lcc")
     env = dict(os.environ, LCCDIR=args.lcc_dir)
@@ -131,6 +167,8 @@ def main():
                  write(os.path.join(work, f"in-{i}.bin"), inp), out])
             golden.append(read(out))
             c.check(len(golden[-1]) == OUT_BYTES, f"{mode}: TFLM output size")
+        for n, i in enumerate(VECTOR_INPUTS):
+            vectors[f"expected-{mode}-{n}.bin"] = golden[i]
 
         # The generated C on the CPU
         exe = os.path.join(work, f"conv_{mode}")
@@ -172,6 +210,7 @@ def main():
                     continue
 
                 c.check(n_waits > 0, f"{tag}: wait commands present")
+                vectors[f"conv-{mode}-{SRAM_NAMES[sram]}.knpu"] = read(knpu)
                 print(f"{tag}: {convs} tiles, {n_waits} waits, "
                       f"{len(model.cmds)} command bytes")
                 for i, inp in enumerate(inputs):
@@ -188,6 +227,8 @@ def main():
                             f"{tag}: PERF_DMA_WR_BYTES "
                             f"{result['dma_wr_bytes']}")
 
+    if args.vectors:
+        check_vectors(c, args.vectors, vectors, args.update_vectors)
     print(f"{c.passes} passed, {c.failures} failed")
     sys.exit(1 if c.failures else 0)
 

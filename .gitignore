@@ -5,8 +5,9 @@
 /output/
 /dl/
 
-# Host builds (tests/npu-core and later CMake projects)
+# Host builds (CMake projects and the runtime's cargo workspace)
 /build/
+/runtime/target/
 
 # Editor and patch leftovers
 *.orig

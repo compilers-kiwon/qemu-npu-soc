@@ -82,8 +82,8 @@ QEMU ARMv8 `virt` 보드 위에 SystemC 가속기 모델, 리눅스 드라이버
 | D38 | 컴파일러 구조 | MLIR standalone 예제의 구성을 따르고 모두 C++로 짠다. 도구는 `knpu-opt`(패스), `knpu-translate`(`knpu` 다이얼렉트에서 `model.knpu`로), `knpu-compile`(lcc가 낸 `.mlir`에서 `model.knpu`까지)이다. Python은 생성기 `tflite2c`에만 쓴다(D12). | MLIR의 트리 밖 예제(`mlir/examples/standalone`)와 같은 구성이다. |
 | D39 | 모델 파일 | 자체 리틀 엔디언 컨테이너 `model.knpu`. | 런타임이 다른 라이브러리 없이 읽는다. |
 | D40 | 영역 역할 | Vela 관례를 따른다. 영역 0은 상수, 영역 1은 arena(입력, 출력, SRAM에서 내보낸 활성값)이고, 영역 2~7은 쓰지 않는다. | Vela와 같은 관례다(`BasePointerIndex`: 0 가중치, 1 스크래치 arena). |
-| D41 | 런타임 | Rust로 `libknpu` 크레이트와 `knpu-infer`를 만든다. Buildroot의 cargo 패키지 방식과 미리 빌드된 Rust 툴체인(`host-rust-bin`)으로 빌드한다. | 메모리 안전성. Buildroot에서 glibc를 쓰는 aarch64는 Rust tier 1 대상이다. |
-| D42 | CI | GitHub Actions. push마다 V2~V4를 돌리고, 매일 밤과 수동 실행 때는 Buildroot 전체 빌드와 V1, V5, V6을 돌린다. | 공개 저장소에서 Actions는 무료이고, 작업 하나는 6시간까지 돌 수 있으며, 캐시는 저장소당 10 GB다. |
+| D41 | 런타임 | Rust로 `libknpu` 크레이트와 `knpu-infer`를 만든다. Buildroot의 cargo 패키지 방식과 미리 빌드된 Rust 툴체인(`host-rust-bin`)으로 빌드한다. 외부 크레이트는 쓰지 않는다. | 메모리 안전성. Buildroot에서 glibc를 쓰는 aarch64는 Rust tier 1 대상이다. 저장소 안의 소스는 Buildroot가 내려받지 않고 복사하므로 크레이트 의존성을 vendoring하지 않는다. 필요한 시스템 호출은 넷뿐이다. |
+| D42 | CI | GitHub Actions. push마다 V2~V4와 런타임 호스트 시험을 돌리고, 매일 밤과 수동 실행 때는 Buildroot 전체 빌드와 V1, V5, V6을 돌린다. | 공개 저장소에서 Actions는 무료이고, 작업 하나는 6시간까지 돌 수 있으며, 캐시는 저장소당 10 GB다. |
 | D43 | 업스트림 버전 | 최신 안정판을 고정한다: QEMU v11.1.3, Linux v7.3.1, TF-A v2.15.0, U-Boot v2026.10, Buildroot 2026.08.1. | 현재 LTS 커널(6.18)에는 가장 가까운 참조인 Ethos-U 드라이버가 없다. 버전을 올리는 일은 따로 결정한다. |
 | D44 | 대상 툴체인 | Buildroot 내부 툴체인(GCC, glibc). | 툴체인은 Buildroot로 구성해 소스에서 재현한다. 직접 만든 컴파일러로 커널을 빌드하는 일은 범위 밖이다(1절). |
 
@@ -763,16 +763,34 @@ C++다.
 
 ## 10. 런타임과 데모 앱
 
-- `libknpu`(Rust 크레이트): 장치를 열고 조회하며, 버퍼를 할당하고 매핑하고,
-  `model.knpu`를 읽고, 영역을 붙이고, 입력을 arena로 복사하고, 제출하고
-  기다리며, perfmon 카운터를 읽고, CPU 후처리(softmax, argmax)를 한다.
-- `knpu-infer`(Rust 바이너리): 모델과 입력 이미지를 읽어 top-1 클래스와 성능
-  카운터를 출력하고, 출력을 기대값과 비교한다.
-- UAPI 구조체는 Rust의 `#[repr(C)]` 타입으로 옮긴다. bindgen으로 생성할지
-  손으로 쓸지는 구현할 때 정한다.
-- Buildroot의 cargo 패키지 방식으로 빌드한다. 이 방식은 내려받는 단계에서
-  크레이트 의존성을 vendoring한다(`package/pkg-cargo.mk`). Rust 툴체인은
-  미리 빌드된 것(`host-rust-bin`)을 쓴다(D41).
+`runtime/`은 cargo 작업 공간이고 크레이트가 둘이다(D41).
+
+- `libknpu`(라이브러리 이름 `knpu`): 장치를 열고 조회하며(`KNPU_QUERY`),
+  `model.knpu`를 읽어 형식 9절대로 검사한다. 이때 장치의 `VERSION.MAJOR`,
+  `SRAM_SIZE`와도 비교한다. 영역마다 버퍼를 만들어 매핑하고, 상수 영역을
+  채우고, 명령열을 만든다. 실행할 때마다 입력을 arena로 복사하고, perfmon을
+  붙여 제출하고 기다린 뒤, 출력과 카운터 네 개를 돌려준다. CPU
+  후처리(softmax, argmax)는 M2에서 더한다.
+- `knpu-infer`(바이너리): `knpu-infer [--device PATH] MODEL INPUT
+  [--expect FILE] [--output FILE]`. 모델 요약과 카운터(`macs`,
+  `dma_rd_bytes`, `dma_wr_bytes`, `ops`)를 찍고, `--expect`가 있으면 출력을
+  그 파일과 바이트 단위로 비교한다. 종료 코드는 0 일치, 1 불일치, 2 오류다.
+  출력이 분류 벡터인 모델(M2)부터는 top-1 클래스도 찍는다.
+- 시스템 호출 `ioctl`, `mmap`, `munmap`, `clock_gettime`은 `extern "C"`로
+  직접 선언한다. Rust 표준 라이브러리가 이미 glibc를 링크한다.
+- UAPI 구조체와 ioctl 번호는 `#[repr(C)]` 타입과 상수로 손으로 옮긴다.
+  호스트 시험이 `knpu_accel.h`를 C로 컴파일해 구조체 크기, 필드 위치, ioctl
+  번호를 뽑아 Rust 정의와 비교한다. ioctl 번호의 인코딩은 x86_64와
+  aarch64가 같다(asm-generic).
+- Buildroot 패키지 `knpu-runtime`이 cargo 패키지 방식으로 `knpu-infer`를
+  빌드해 `/usr/bin`에 넣는다. Rust 툴체인은 미리 빌드된 것(`host-rust-bin`
+  1.97.1)을 쓴다. 외부 크레이트가 없으므로 `Cargo.lock`만으로 `--offline
+  --locked` 빌드가 된다.
+- 시험 모델(`models/conv/vectors/`: 컴파일한 모델, 입력, TFLite Micro
+  정답값)은 `knpu-models` 패키지가 `/usr/share/knpu/conv/`에 넣는다. 그래서
+  부팅한 보드에서 바로 `knpu-infer`를 돌릴 수 있다. 이 파일들은 컴파일러와
+  V2가 만든 것을 커밋한 것이고, push CI의 V3가 지금 만든 것과 같은지
+  검사한다.
 
 ---
 
@@ -787,12 +805,12 @@ C++다.
 | V5 | 드라이버: 검증기 부정 시험(잘못된 명령열과 범위를 벗어난 명령열은 거부돼야 함), 4 GiB 위의 버퍼, 장치 오류와 타임아웃 뒤 복구, perfmon, runtime PM, 모듈 재적재 | 게스트 |
 | V6 | 끝-끝: kn1-evb를 부팅해 MNIST CNN과 ResNet-8을 돌리고, V2와 비교하고, 카운터를 보고 | QEMU |
 
-CI(D42, GitHub Actions): push마다 V2~V4를 돌리고, 매일 밤과 수동 실행 때
-Buildroot 전체 빌드와 V1, V5, V6을 돌린다. 바인딩과 DT의 스키마 검사
-(`tests/dt/check-dt.sh`)도 push마다 돈다.
-야간 작업은 지금 전체 빌드, 부팅 스모크 시험(`tests/boot/`, M1.2 완료
-조건), V1(`tests/qemu/run-v1.sh`), V5(`tests/driver/kn1_v5_test.py`)를
-돌리고, V6은 생기면 더한다.
+CI(D42, GitHub Actions): push마다 V2~V4와 런타임의 호스트 시험(`cargo
+test`: 모델 파싱과 검사, UAPI 대조, `knpu-infer` 인자)을 돌리고, 매일 밤과
+수동 실행 때 Buildroot 전체 빌드와 V1, V5, V6을 돌린다. 바인딩과 DT의
+스키마 검사(`tests/dt/check-dt.sh`)도 push마다 돈다. 야간 작업은 전체 빌드,
+부팅 스모크 시험(`tests/boot/`, M1.2 완료 조건), V1(`tests/qemu/run-v1.sh`),
+V5(`tests/driver/kn1_v5_test.py`), V6(`tests/e2e/kn1_v6_test.py`)을 돌린다.
 
 ---
 
@@ -812,7 +830,7 @@ qemu-npu-soc/
 ├── runtime/         libknpu와 knpu-infer(Rust)
 ├── br2-external/    Buildroot 외부 트리(defconfig, 커널 설정, 패키지, 패치)
 ├── buildroot/       Buildroot 서브모듈(고정)
-├── models/          .tflite 모델, 학습·변환 스크립트
+├── models/          .tflite 모델과 만드는 스크립트, 컴파일한 시험 벡터
 └── tests/           장치, 드라이버, 컴파일러, 끝-끝 시험
 ```
 
@@ -909,7 +927,7 @@ lcc가 가치의 큰 부분을 차지하는 제품을 파는 것은 금지한다
 | Linux v7.3.1 | Buildroot가 받은 tarball(2026-11-17) | `drivers/accel/ethosu`(드라이버 구조, `ethosu_job.c`의 타임아웃·IRQ·제출 검사, `ethosu_perfmon.c`, UAPI의 ioctl 10개); `drm_sched_start()`가 끝나지 않은 작업을 `-ECANCELED`로 끝냄(`sched_main.c:499`)과 `DRM_GPU_SCHED_STAT_NO_HANG`(366-367); 의존성 fence의 오류를 다음 작업에 넘기지 않음(오류를 다는 곳은 guilty 엔티티뿐, `sched_entity.c:547-549`); `drm_gem_dma_resv_wait()`(`drm_gem.c:903-925`); 잠그지 않은 fence 순회가 signal된 fence를 건너뜀(`dma-resv.c:402`); arm64 CMA 위치(`arch/arm64/mm/init.c:323`); `dma-direct`의 대신 할당(`kernel/dma/direct.c:127-148`); 드라이버 해제 순서(`drivers/base/dd.c`)와 `devm_pm_runtime_set_active_enabled()`(`runtime.c:1597-1632`); accel debugfs 위치(`drm_debugfs.c:400-407`); `ivpu`의 debugfs `force_recovery`; `arm,ethos.yaml`; arm64 `defconfig`의 `CONFIG_DRM_ACCEL` 꺼짐과 `DRM_GEM_DMA_HELPER`·`DRM_SCHED`=m |
 | U-Boot | master `ab4dc5a`(2026-11-02), 릴리스 v2026.10 | `qemu-arm.c:147-150`; `dts/Kconfig`(`OF_SEPARATE`, `OF_BOARD`, `OF_HAS_PRIOR_STAGE`); `arch/arm/Kconfig`(보드 Kconfig 2482행, `OF_HAS_PRIOR_STAGE`를 고르는 플랫폼); `boot/pxe_utils.c:645-662`; `lib/fdtdec.c:1779`; `drivers/mmc/arm_pl180_mmci.c:601-606`; `drivers/virtio/`; `doc/board/emulation/qemu-arm.rst:61-88`의 TF-A 흐름; `Licenses/README` |
 | TF-A | master `2fbca70`(2026-11-03), 릴리스 v2.15.0 | `plat/qemu`(`platform_def.h`: 클러스터 20-41, 보안 메모리 80-90, 보안 GPIO 92-95; `qemu_pm.c:217-253`; `qemu_bl2_setup.c`의 DT 수정과 `TRANSFER_LIST`); `platform.mk:17`, 159-160; `plat_helpers.mk:18-39`; `drivers/arm/pl061/pl061_gpio.c`; Rockchip `params_setup.c`(`poweroff_gpio`)와 `rk3399/drivers/soc/soc.c:342`; `imx8m_psci_common.c:163`; BSD-3-Clause 기여 규칙 |
-| Buildroot | master `f03de2f`(2026-11-02), 릴리스 2026.08.1 | `BR2_LINUX_KERNEL_CUSTOM_DTS_PATH`(`linux/Config.in:502`)와 설정 방식(228-267); `BR2_TARGET_UBOOT_CUSTOM_DTS_PATH`(`boot/uboot/Config.in:824`); Bootlin 외부 툴체인(`toolchain-external-bootlin`); Rust(`package/rustc/Config.in.host`, `package/pkg-cargo.mk`); `BR2_GLOBAL_PATCH_DIR`; 호스트 QEMU; TF-A 옵션; 커널 모듈 방식; `BR2_EXTERNAL` 매뉴얼 |
+| Buildroot | master `f03de2f`(2026-11-02), 릴리스 2026.08.1 | `BR2_LINUX_KERNEL_CUSTOM_DTS_PATH`(`linux/Config.in:502`)와 설정 방식(228-267); `BR2_TARGET_UBOOT_CUSTOM_DTS_PATH`(`boot/uboot/Config.in:824`); Bootlin 외부 툴체인(`toolchain-external-bootlin`); Rust(`package/rustc/Config.in.host:146-158`의 `host-rust-bin` 기본값, `package/rust-bin/rust-bin.mk:9`의 1.97.1, `package/pkg-cargo.mk`의 vendoring과 `--offline --locked` 빌드, `package/pkg-generic.mk`의 local 방식 rsync 222-231·645-652); `BR2_GLOBAL_PATCH_DIR`; 호스트 QEMU; TF-A 옵션; 커널 모듈 방식; `BR2_EXTERNAL` 매뉴얼 |
 | Buildroot 릴리스 | buildroot.org 내려받기 페이지(2026-11-05 조회) | 2026.08.1 안정판(지원 종료 2026년 12월); 2025.02.19 LTS(지원 종료 2028년 3월) |
 | TFLite Micro | `fd2a85d`(2026-11-04) | 참조 커널(`conv.h:54-131`); 반올림 구현(`common.cc:31-113`); `schema.fbs`; int8 `ConvPerChannel`, `FullyConnected`, `AddFunc`, `AveragePool`과 고정소수점 보조 함수(행 번호는 `docs/npu-spec.md` 13절); CMake 빌드(`CMakeLists.txt`, `cmake/generated/tflm_sources.cmake`)와 flatbuffers 고정(`MODULE.bazel`의 v25.9.23); Python 스키마(`tensorflow/lite/micro/python/schema_py_generated.py`); 합성곱 양자화 파라미터와 clamp(`tensorflow/lite/micro/kernels/kernel_util.cc:60-90`, 369-445), `QuantizeMultiplier`(`tensorflow/lite/micro/kernels/internal/quantization_util.cc:54-104`) |
 | PyPI | `flatbuffers` 25.9.23(2026-11-22 조회) | 생성기의 `.tflite` 읽기. Apache-2.0 |

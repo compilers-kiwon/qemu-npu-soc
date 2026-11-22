@@ -41,7 +41,7 @@ MLIR로 컴파일해 이 NPU에서 돌리고, 결과를 TFLite Micro 참조 구�
 | U-Boot | v2026.10 | Buildroot(source.denx.de의 태그) |
 | Buildroot | 2026.08.1 | 서브모듈 |
 | LLVM/MLIR | 23.x | 호스트의 apt.llvm.org 패키지 |
-| Rust | Buildroot 2026.08.1에 들어 있는 버전 | Buildroot |
+| Rust | 1.97.1(Buildroot 2026.08.1의 `host-rust-bin`) | Buildroot |
 
 컴파일러와 그 시험이 빌드할 때 받는 것(모두 SHA-256 검사): lcc
 `v4.2-llvm.3`의 aarch64 mlir 드라이버, TensorFlow Lite Micro
@@ -72,8 +72,9 @@ make -C buildroot O="$PWD/output" BR2_EXTERNAL="$PWD/br2-external"
 
 두 번째 `make`가 툴체인, TF-A 2.15.0(`plat/kiwon/kn1`), U-Boot 2026.10,
 Linux 7.3.1(arm64 `defconfig`에 `CONFIG_DRM_ACCEL`), NPU 드라이버 모듈
-`knpu`와 V5 시험 프로그램, 루트 파일 시스템, 디바이스 트리, 그리고 kn1-evb
-머신을 넣은 QEMU 11.1.3을 모두 빌드한다. 결과물은 `output/images/`에
+`knpu`와 V5 시험 프로그램, Rust 런타임 `knpu-infer`와 시험 모델, 루트 파일
+시스템, 디바이스 트리, 그리고 kn1-evb 머신을 넣은 QEMU 11.1.3을 모두
+빌드한다. 결과물은 `output/images/`에
 놓인다: `bl1.bin`과 `fip.bin`(BL2, BL31, U-Boot)을 합친 부트 플래시 이미지
 `flash.bin`, 루트 파일 시스템 `rootfs.ext4`(`/boot/Image`,
 `/boot/kn1-evb.dtb`, `/boot/extlinux/extlinux.conf` 포함)를 GPT 파티션 하나에
@@ -225,18 +226,63 @@ build/compiler/bin/knpu-compile --sram-size=65536 conv.mlir -o conv.knpu
 시험 모델은 `models/conv/make_model.py`가 TensorFlow 2.21.0으로 만든 것이다.
 CI와 컴파일러에는 TensorFlow가 필요 없다.
 
+## 런타임과 끝-끝 시험
+
+`runtime/`은 Rust cargo 작업 공간이다(설계 10절). `libknpu`가 `model.knpu`를
+읽어 검사하고, 영역 버퍼와 명령열을 만들어 `knpu` 드라이버로 실행한다.
+`knpu-infer`는 모델 하나를 입력 하나로 돌려 성능 카운터를 찍고, 기대값과
+비교한다. 외부 크레이트는 쓰지 않는다. Buildroot가 `knpu-infer`를 `/usr/bin`에,
+시험 모델과 입력, 정답값(`models/conv/vectors/`)을 `/usr/share/knpu/conv/`에
+넣는다.
+
+부팅한 kn1-evb에서 4 KiB SRAM용으로 컴파일한 모델(타일 5개)을 돌리면 다음과
+같다.
+
+```
+# modprobe knpu
+# cd /usr/share/knpu/conv
+# knpu-infer conv-double-4k.knpu input-0.bin --expect expected-double-0.bin
+model=conv-double-4k.knpu format=0.0 sram_size=4096 command_bytes=520 model_ops=16
+input_shape=1x14x14x8 input_scale=0.003921531 input_zero_point=-128 output_shape=1x14x14x16 output_scale=0.0072401874 output_zero_point=-128
+device=/dev/accel/accel0 npu=0.0 device_sram_size=65536
+macs=225792 dma_rd_bytes=3808 dma_wr_bytes=3136 ops=16
+match=yes
+```
+
+호스트 시험(모델 파싱과 검사, UAPI 정의와 C 헤더 대조, 명령줄)은 Rust
+1.97.1로 돈다.
+
+```bash
+cd runtime && cargo test --locked
+```
+
+V6은 펌웨어 체인으로 부팅한 게스트에서 모델 넷(반올림 double·single × SRAM
+64 KiB·4 KiB)을 입력 다섯으로 돌려 TensorFlow Lite Micro의 출력과 비교하고,
+카운터와 잘린 모델의 거부를 확인한다.
+
+```bash
+python3 tests/e2e/kn1_v6_test.py
+```
+
+컴파일러 출력이 바뀌면 시험 벡터를 다시 만들어 커밋한다. 커밋본이 다르면
+V3(`ctest`)가 실패한다.
+
+```bash
+cmake --build build/compiler --target update-conv-vectors
+```
+
 ## CI
 
 GitHub Actions에서는 push마다 defconfig, `check-package`, `reuse lint`,
-NPU 공유 코어 시험(V2, V3), 모델 컴파일러 시험(V2~V4), 바인딩과 디바이스
-트리의 스키마 검사를 돌리고(`ci.yml`), 매일 밤과 수동 실행 때 전체 빌드,
-부팅 시험, V1, V5를 돌린다(`nightly.yml`).
+NPU 공유 코어 시험(V2, V3), 모델 컴파일러 시험(V2~V4), 런타임 호스트 시험,
+바인딩과 디바이스 트리의 스키마 검사를 돌리고(`ci.yml`), 매일 밤과 수동 실행
+때 전체 빌드, 부팅 시험, V1, V5, V6을 돌린다(`nightly.yml`).
 
 ## 현재 상태
 
 | 마일스톤 | 목표 | 상태 |
 |----------|------|------|
-| M1 | 합성곱 하나를 모든 층에 관통시킨다 | 진행 중. M1.1 저장소 뼈대, M1.2 펌웨어 체인 부팅(QEMU 머신, 디바이스 트리, TF-A, U-Boot, 리눅스 셸), M1.3 NPU 명세 v0([docs/npu-spec.md](docs/npu-spec.md)), M1.4 NPU 공유 코어와 정답값 비교(V2, V3), M1.5 QEMU NPU 장치(V1), M1.6 `knpu` 드라이버(V5), M1.7 모델 컴파일러 최소 경로(V2~V4)까지 끝났다 |
+| M1 | 합성곱 하나를 모든 층에 관통시킨다 | 끝났다. M1.1 저장소 뼈대, M1.2 펌웨어 체인 부팅(QEMU 머신, 디바이스 트리, TF-A, U-Boot, 리눅스 셸), M1.3 NPU 명세 v0([docs/npu-spec.md](docs/npu-spec.md)), M1.4 NPU 공유 코어와 정답값 비교(V2, V3), M1.5 QEMU NPU 장치(V1), M1.6 `knpu` 드라이버(V5), M1.7 모델 컴파일러 최소 경로(V2~V4), M1.8 런타임과 끝-끝 시험(V6) |
 | M2 | MNIST CNN | 시작 전 |
 | M3 | MLPerf Tiny ResNet-8 | 시작 전 |
 | M4 | 마무리: 새로 받은 저장소에서 README만으로 빌드와 데모 | 시작 전 |

@@ -153,14 +153,30 @@ GitHub에서 한 번 성공한다.
 
 ### M1.8 런타임과 끝에서 끝까지 (V6)
 
-- `runtime/`: Rust `libknpu` 크레이트(UAPI 바인딩, `model.knpu` 읽기, arena
-  복사, 제출과 대기, perfmon)와 `knpu-infer`(D41).
-- `br2-external`에 cargo 패키지를 더하고 `host-rust-bin`으로 빌드한다.
-- V6: kn1-evb를 펌웨어 체인으로 부팅하고, `knpu-infer`로 합성곱 모델을 돌려
-  V2와 비교하고, 카운터를 출력한다.
-- CI: 매일 밤과 수동 실행 때 Buildroot 전체 빌드와 V1, V5, V6을 돌린다(D42).
+- 시험 벡터 `models/conv/vectors/`: M1.7 컴파일러가 낸 모델 넷(반올림
+  double·single × SRAM 64 KiB·4 KiB), 입력 다섯(무작위 셋, 전부 -128, 전부
+  127), TFLite Micro 정답값 열. V3가 이 커밋본이 지금 생성물과 같은지
+  검사하고, `--update-vectors`일 때 다시 쓴다.
+- `runtime/`: Rust cargo 작업 공간. `libknpu`(UAPI 바인딩, `model.knpu`
+  읽기와 검사, 영역 버퍼, arena 복사, 제출과 대기, perfmon)와 `knpu-infer`.
+  외부 크레이트는 쓰지 않는다(D41, 설계 10절).
+- 호스트 시험(`cargo test`): 모델 파싱과 형식 검사, UAPI 정의와 C 헤더
+  대조, `knpu-infer` 인자.
+- `br2-external`: cargo 패키지 `knpu-runtime`(`host-rust-bin`)과 벡터를
+  넣는 `knpu-models`.
+- V6(`tests/e2e/kn1_v6_test.py`): kn1-evb를 펌웨어 체인으로 부팅하고
+  `knpu-infer`로 모델 넷과 입력 다섯을 돌려 정답값과 비교한다. 카운터
+  (`PERF_MACS`, `PERF_DMA_WR_BYTES`, `PERF_OPS`)를 확인하고, 잘린 모델
+  파일을 거부하는지 본다.
+- CI: push마다 런타임 호스트 시험(`runtime` 작업)을 돌리고, 매일 밤과 수동
+  실행 때 V1, V5 다음에 V6을 돌린다(D42).
 
-완료 조건: V6이 통과하고, 야간 CI 작업이 한 번 성공한다.
+완료 조건:
+
+- V6이 통과한다. 모든 모델과 입력이 정답값과 같고, 카운터가 모델과 맞고,
+  커널 경고가 없다.
+- 런타임 호스트 시험과 V3(벡터 비교 포함)가 push CI에서 통과한다.
+- 야간 CI 작업이 V6을 포함해 한 번 성공한다.
 
 ---
 

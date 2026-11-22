@@ -4,3 +4,5 @@
 source "$BR2_EXTERNAL_KN1_PATH/package/qemu-kn1/Config.in.host"
 source "$BR2_EXTERNAL_KN1_PATH/package/knpu/Config.in"
 source "$BR2_EXTERNAL_KN1_PATH/package/knpu-tests/Config.in"
+source "$BR2_EXTERNAL_KN1_PATH/package/knpu-runtime/Config.in"
+source "$BR2_EXTERNAL_KN1_PATH/package/knpu-models/Config.in"

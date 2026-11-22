@@ -93,6 +93,24 @@ jobs:
       - name: Run V4 (lit) and V2, V3 (end to end)
         run: ctest --test-dir build/compiler --output-on-failure
 
+  # Host tests of the runtime (docs/design.md 10): model.knpu parsing and
+  # checks on the committed test models, the hand-written UAPI against
+  # knpu_accel.h, and knpu-infer's command line. Rust is the version
+  # Buildroot builds the runtime with.
+  runtime:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust 1.97.1
+        run: |
+          rustup toolchain install 1.97.1 --profile minimal
+          rustup default 1.97.1
+
+      - name: Run the host tests
+        working-directory: runtime
+        run: cargo test --locked --offline
+
   # Schema checks of the kn1-npu binding and the kn1-evb device tree against
   # the pinned Linux release (M1.6)
   dt-binding:

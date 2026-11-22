@@ -1,0 +1,16 @@
+# SPDX-FileCopyrightText: 2026 Kiwon Kwon
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+
+# Runtime of the kn1-npu (docs/design.md 10): the libknpu library and the
+# knpu-infer tool. No external crates (D41).
+
+[workspace]
+members = ["libknpu", "knpu-infer"]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97"
+license = "Apache-2.0 WITH LLVM-exception"
+publish = false

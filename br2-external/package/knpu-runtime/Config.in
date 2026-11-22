@@ -1,0 +1,12 @@
+# SPDX-FileCopyrightText: 2026 Kiwon Kwon
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+config BR2_PACKAGE_KNPU_RUNTIME
+	bool "knpu-runtime"
+	depends on BR2_PACKAGE_HOST_RUSTC_TARGET_ARCH_SUPPORTS
+	select BR2_PACKAGE_HOST_RUSTC
+	help
+	  libknpu and knpu-infer, the user-space runtime of the
+	  kn1-npu (/usr/bin/knpu-infer), from runtime/ of this
+	  repository. knpu-infer runs a model.knpu file through the
+	  knpu driver.

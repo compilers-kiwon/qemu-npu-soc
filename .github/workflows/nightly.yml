@@ -88,6 +88,14 @@ jobs:
           --host-bin output/host/bin
           --log-dir output/test-logs
 
+      - name: V6 (end to end, knpu-infer)
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: >
+          python3 tests/e2e/kn1_v6_test.py
+          --images output/images
+          --host-bin output/host/bin
+          --log-dir output/test-logs
+
       - name: Keep the end of the build log
         if: failure()
         run: tail -n 500 build.log > build-tail.log || true

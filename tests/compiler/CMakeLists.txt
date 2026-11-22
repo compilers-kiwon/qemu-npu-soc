@@ -47,18 +47,29 @@ add_executable(knpu_run ${KNPU_REPO_DIR}/tests/npu-core/knpu_run.c
 target_include_directories(knpu_run PRIVATE ${NPU_CORE_DIR})
 set_target_properties(knpu_run PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
 
+set(CONV_MODEL_TEST
+  ${CMAKE_CURRENT_SOURCE_DIR}/test_conv_model.py
+  --model ${KNPU_REPO_DIR}/models/conv/conv.tflite
+  --tflite2c ${KNPU_TFLITE2C}
+  --schema ${KNPU_TFLITE_SCHEMA}
+  --lcc-dir ${KNPU_LCC_DIR}
+  --cc ${CMAKE_C_COMPILER}
+  --knpu-compile $<TARGET_FILE:knpu-compile>
+  --knpu-run $<TARGET_FILE:knpu_run>
+  --tflm-double $<TARGET_FILE:tflm_run_double>
+  --tflm-single $<TARGET_FILE:tflm_run_single>
+  --work-dir ${CMAKE_CURRENT_BINARY_DIR}/work-conv
+  --vectors ${KNPU_REPO_DIR}/models/conv/vectors)
+
 add_test(NAME v3_conv_model
-         COMMAND Python3::Interpreter
-                 ${CMAKE_CURRENT_SOURCE_DIR}/test_conv_model.py
-                 --model ${KNPU_REPO_DIR}/models/conv/conv.tflite
-                 --tflite2c ${KNPU_TFLITE2C}
-                 --schema ${KNPU_TFLITE_SCHEMA}
-                 --lcc-dir ${KNPU_LCC_DIR}
-                 --cc ${CMAKE_C_COMPILER}
-                 --knpu-compile $<TARGET_FILE:knpu-compile>
-                 --knpu-run $<TARGET_FILE:knpu_run>
-                 --tflm-double $<TARGET_FILE:tflm_run_double>
-                 --tflm-single $<TARGET_FILE:tflm_run_single>
-                 --work-dir ${CMAKE_CURRENT_BINARY_DIR}/work-conv)
+         COMMAND Python3::Interpreter ${CONV_MODEL_TEST})
 set_tests_properties(v3_conv_model PROPERTIES
                      ENVIRONMENT PYTHONDONTWRITEBYTECODE=1)
+
+# Writes the V6 test vectors (models/conv/vectors/) from this build; commit
+# them when the compiler's output changes
+add_custom_target(update-conv-vectors
+  COMMAND ${CMAKE_COMMAND} -E env PYTHONDONTWRITEBYTECODE=1
+          ${Python3_EXECUTABLE} ${CONV_MODEL_TEST} --update-vectors
+  DEPENDS knpu-compile knpu_run tflm_run_double tflm_run_single
+  USES_TERMINAL)
