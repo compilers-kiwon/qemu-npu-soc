@@ -3,7 +3,8 @@
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 """V2 and V3 of the MNIST CNN of M2 (docs/plan.md M2.1 to M2.8).
 
-So far (M2.1 and M2.3) the model, its references and the generator:
+So far (M2.1 to M2.4) the model, its references, the generator and the NPU
+part of the compiled model:
 
 1. models/mnist/mnist.tflite has the operators of docs/design.md 6.6 and
    its nominal MACs and parameters.
@@ -19,6 +20,17 @@ So far (M2.1 and M2.3) the model, its references and the generator:
    its output. UBSan must report nothing.
 5. lcc (aarch64 mlir driver, -A -Wf-pragma=knpu) takes the same C without
    warnings.
+6. V3: knpu-compile turns lcc's output of the --npu-only C into model.knpu
+   for a 64 KiB and a 32 KiB SRAM, with the overlapped and the serial
+   (--overlap=false) schedule. knpu_run executes it on hw/npu-core for
+   every input: the logits must equal V2's (so a fully connected layer run
+   as a 1x1 convolution equals FullyConnected), PERF_MACS must be the
+   model's nominal MACs and the DMA and operation counters what the command
+   stream implies. With overlap the activations stay in SRAM: only the
+   input and the constants are read and only the logits written. The
+   estimated cycles (--report) are fewer with overlap.
+7. Compiled without wait commands (--insert-waits=false), the model stops
+   with a synchronization error.
 
 Inputs: the ten digit images (models/mnist/digits/), three random inputs,
 all -128 and all 127. The random inputs come from a seeded stream: the
@@ -32,8 +44,13 @@ import argparse
 import importlib.util
 import os
 import random
+import re
 import subprocess
 import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import model_file  # noqa: E402
+from test_conv_model import ERR_SYNC, run_npu  # noqa: E402
 
 SEED = 20261123
 SEARCH_LIMIT = 200   # random inputs tried for one that tells the modes apart
@@ -45,6 +62,13 @@ OPERATORS = ["CONV_2D", "AVERAGE_POOL_2D", "CONV_2D", "AVERAGE_POOL_2D",
              "RESHAPE", "FULLY_CONNECTED", "FULLY_CONNECTED", "SOFTMAX"]
 MACS = 214_304
 PARAMS = 27_562
+SRAM_SIZES = {65536: "64k", 32768: "32k"}
+
+# Command numbers (hw/npu-core/knpu_cmd.h)
+OP_STOP, OP_CONV, OP_ADD, OP_AVGPOOL = 0x0000, 0x0002, 0x0003, 0x0004
+OP_DMA = 0x0010
+SET_DMA_COUNT, SET_DMA_SRC, SET_DMA_LEN = 0x0108, 0x4010, 0x4012
+CMD_PAYLOAD, SPACE_SRAM = 0x4000, 1
 
 
 class Checker:
@@ -117,6 +141,36 @@ def summary(path, schema):
     return ops, macs, params
 
 
+def stream_counters(model):
+    """PERF_DMA_RD_BYTES, PERF_DMA_WR_BYTES and PERF_OPS that the command
+    stream implies (docs/npu-spec.md 11)."""
+    words = model.words()
+    src_sram, length, count = True, 0, 1   # the SET state after START
+    rd = wr = ops = 0
+    i = 0
+    while i < len(words):
+        cmd, param = words[i] & 0xFFFF, words[i] >> 16
+        payload = words[i + 1] if cmd & CMD_PAYLOAD else None
+        i += 2 if cmd & CMD_PAYLOAD else 1
+        if cmd == SET_DMA_SRC:
+            src_sram = param >> 8 == SPACE_SRAM
+        elif cmd == SET_DMA_LEN:
+            length = payload
+        elif cmd == SET_DMA_COUNT:
+            count = param
+        elif cmd == OP_DMA:
+            ops += 1
+            if src_sram:
+                wr += length * count
+            else:
+                rd += length * count
+        elif cmd in (OP_CONV, OP_ADD, OP_AVGPOOL):
+            ops += 1
+        elif cmd == OP_STOP:
+            break
+    return rd, wr, ops
+
+
 def top1(data):
     """Index of the largest int8 element (the first one on a tie)."""
     values = [b - 256 if b > 127 else b for b in data]
@@ -126,7 +180,8 @@ def top1(data):
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     for opt in ("model", "digits", "tflite2c", "schema", "lcc-dir", "cc",
-                "tflm-double", "tflm-single", "work-dir"):
+                "knpu-compile", "knpu-run", "tflm-double", "tflm-single",
+                "work-dir"):
         ap.add_argument(f"--{opt}", required=True)
     args = ap.parse_args()
     work = args.work_dir
@@ -230,6 +285,56 @@ def main():
                             f"{tag} {build} {n}: output differs from V2")
                     c.check(read(logits) == want_logits,
                             f"{tag} {build} {n}: logits differ from V2")
+
+    # V3: the NPU part on the shared core
+    for mode in ("double", "single"):
+        mlir = os.path.join(work, f"mnist-{mode}-npu.mlir")
+        for sram, size_name in SRAM_SIZES.items():
+            cycles = {}
+            for overlap in (True, False):
+                tag = f"{mode}-{size_name}" + ("" if overlap else "-serial")
+                knpu = os.path.join(work, f"mnist-{tag}.knpu")
+                text = run([args.knpu_compile, f"--sram-size={sram}",
+                            f"--overlap={'true' if overlap else 'false'}",
+                            "--report", mlir, "-o", knpu]).stdout
+                total = re.search(r"total cycles (\d+)", text)
+                cycles[overlap] = int(total.group(1)) if total else None
+                model = model_file.read(read(knpu))
+                c.check(model.sram_size == sram, f"{tag}: header SRAM size")
+                rd, wr, ops = stream_counters(model)
+                if overlap:
+                    const = model.region(0).size
+                    c.check((rd, wr) == (IN_BYTES + const, CLASSES),
+                            f"{tag}: DMA reads {rd} and writes {wr}; only "
+                            f"the input and {const} constant bytes are read "
+                            f"and the logits written")
+                for n, inp in zip(names, inputs):
+                    result, out = run_npu(args, model, inp, work,
+                                          f"npu-{tag}-{n}")
+                    c.check(result["err_code"] == 0,
+                            f"{tag} {n}: err_code {result['err_code']:#x} "
+                            f"at {result['err_offset']:#x}")
+                    c.check(out == golden[mode, n][1],
+                            f"{tag} {n}: logits differ from V2")
+                    c.check(result["macs"] == MACS,
+                            f"{tag} {n}: PERF_MACS {result['macs']}")
+                    c.check((result["dma_rd_bytes"], result["dma_wr_bytes"],
+                             result["ops"]) == (rd, wr, ops),
+                            f"{tag} {n}: counters differ from the stream")
+            c.check(None not in cycles.values()
+                    and cycles[True] < cycles[False],
+                    f"{mode}-{size_name}: estimated cycles {cycles}")
+            print(f"{mode}-{size_name}: estimated cycles {cycles[True]} "
+                  f"overlapped, {cycles[False]} serial")
+
+        tag = f"{mode}-64k-nowait"
+        knpu = os.path.join(work, f"mnist-{tag}.knpu")
+        run([args.knpu_compile, "--insert-waits=false", mlir, "-o", knpu])
+        result, _ = run_npu(args, model_file.read(read(knpu)), inputs[0],
+                            work, f"npu-{tag}")
+        c.check(result["err_code"] == ERR_SYNC,
+                f"{tag}: SYNC error without waits "
+                f"(err_code {result['err_code']:#x})")
 
     print(f"{c.passes} passed, {c.failures} failed")
     sys.exit(1 if c.failures else 0)

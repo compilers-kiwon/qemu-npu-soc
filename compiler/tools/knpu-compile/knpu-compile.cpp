@@ -3,10 +3,13 @@
 //
 // knpu-compile: compiles the .mlir that lcc writes for a tflite2c model
 // (lcc -S -Wf-pragma=knpu) into model.knpu. It runs knpu-import, knpu-tile,
-// knpu-schedule and knpu-insert-waits and then the model file writer.
+// knpu-schedule, knpu-insert-waits and knpu-estimate and then the model
+// file writer.
 //
 //   knpu-compile model.mlir -o model.knpu [--sram-size=BYTES]
-//                [--emit-mlir] [--insert-waits=false]
+//                [--overlap=false] [--report] [--emit-mlir]
+//                [--insert-waits=false] [--macs-per-cycle=N]
+//                [--dma-bytes-per-cycle=N] [--pool-elements-per-cycle=N]
 
 #include "knpu/Dialect/Knpu/KnpuDialect.h"
 #include "knpu/Target/ModelFile.h"
@@ -19,7 +22,9 @@
 #include "mlir/Parser/Parser.h"
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Support/FileUtilities.h"
+#include "llvm/ADT/MapVector.h"
 #include "llvm/Support/CommandLine.h"
+#include "llvm/Support/Format.h"
 #include "llvm/Support/InitLLVM.h"
 #include "llvm/Support/SourceMgr.h"
 #include "llvm/Support/ToolOutputFile.h"
@@ -36,6 +41,15 @@ static cl::opt<std::string> outputFile("o", cl::desc("Output file"),
 static cl::opt<int64_t> sramSize("sram-size",
                                  cl::desc("SRAM size of the NPU in bytes"),
                                  cl::init(65536));
+static cl::opt<bool> overlap(
+    "overlap",
+    cl::desc("Keep activations in SRAM and load constants and tiles ahead "
+             "(false: the serial schedule, for comparison)"),
+    cl::init(true));
+static cl::opt<bool> report(
+    "report",
+    cl::desc("Print the estimated cycles per layer and in total to stdout"),
+    cl::init(false));
 static cl::opt<bool> emitMlir("emit-mlir",
                               cl::desc("Write the scheduled MLIR instead of "
                                        "model.knpu"),
@@ -45,6 +59,82 @@ static cl::opt<bool> insertWaits(
     cl::desc("Insert wait commands (turning this off is only for showing "
              "that the device then stops with a synchronization error)"),
     cl::init(true));
+static cl::opt<int64_t> macsPerCycle(
+    "macs-per-cycle", cl::desc("Cycle estimate: MACs per cycle"),
+    cl::init(256));
+static cl::opt<int64_t> dmaBytesPerCycle(
+    "dma-bytes-per-cycle", cl::desc("Cycle estimate: DMA bytes per cycle"),
+    cl::init(16));
+static cl::opt<int64_t> poolElementsPerCycle(
+    "pool-elements-per-cycle",
+    cl::desc("Cycle estimate: average pooling window elements per cycle"),
+    cl::init(256));
+
+/// The name of the layer function a command came from (knpu-import puts it
+/// in the location), or "?".
+static StringRef layerName(Location loc) {
+  if (auto name = dyn_cast<NameLoc>(loc))
+    return name.getName().getValue();
+  return "?";
+}
+
+/// Per layer, in the order of their first operation command: the
+/// operations, the bytes and the cycles (from knpu-estimate) of the layer's
+/// commands. The DMAs of constants loaded ahead count for the layer that
+/// uses them.
+static void printReport(ModuleOp module, llvm::raw_ostream &os) {
+  auto fn = module.lookupSymbol<func::FuncOp>(knpu::kModelFunc);
+  struct Row {
+    std::string op;
+    int64_t tiles = 0, dmaBytes = 0;
+    int64_t opStart = -1, opEnd = 0, dmaStart = -1, dmaEnd = 0;
+  };
+  llvm::MapVector<StringRef, Row> rows;
+  for (Operation &op : fn.getBody().front()) {
+    auto cycles = op.getAttrOfType<DenseI64ArrayAttr>(knpu::kCyclesAttr);
+    if (!cycles || !isa<knpu::ConvOp, knpu::PoolOp>(op))
+      continue;
+    Row &row = rows[layerName(op.getLoc())];
+    row.op = isa<knpu::ConvOp>(op) ? "conv" : "pool";
+    ++row.tiles;
+    if (row.opStart < 0)
+      row.opStart = cycles[0];
+    row.opEnd = std::max(row.opEnd, cycles[1]);
+  }
+  for (Operation &op : fn.getBody().front()) {
+    auto cycles = op.getAttrOfType<DenseI64ArrayAttr>(knpu::kCyclesAttr);
+    auto dma = dyn_cast<knpu::DmaOp>(op);
+    if (!cycles || !dma)
+      continue;
+    Row &row = rows[layerName(op.getLoc())];
+    row.dmaBytes += dma.getLength() * dma.getCount();
+    if (row.dmaStart < 0)
+      row.dmaStart = cycles[0];
+    row.dmaEnd = std::max(row.dmaEnd, cycles[1]);
+  }
+
+  auto span = [](int64_t start, int64_t end) {
+    return start < 0 ? std::string("-")
+                     : std::to_string(start) + ".." + std::to_string(end);
+  };
+  os << "estimated cycles (" << macsPerCycle << " MACs, " << dmaBytesPerCycle
+     << " DMA bytes, " << poolElementsPerCycle
+     << " pool elements per cycle; "
+     << (overlap ? "overlapped" : "serial") << " schedule, " << sramSize
+     << "-byte SRAM)\n";
+  os << llvm::format("  %-12s %-5s %5s %13s %10s %13s\n", "layer", "op",
+                     "tiles", "operations", "DMA bytes", "DMA");
+  for (auto &[name, row] : rows)
+    os << llvm::format("  %-12s %-5s %5lld %13s %10lld %13s\n",
+                       name.str().c_str(),
+                       row.op.empty() ? "-" : row.op.c_str(),
+                       static_cast<long long>(row.tiles),
+                       span(row.opStart, row.opEnd).c_str(),
+                       static_cast<long long>(row.dmaBytes),
+                       span(row.dmaStart, row.dmaEnd).c_str());
+  auto total = fn->getAttrOfType<IntegerAttr>(knpu::kTotalCyclesAttr);
+  os << "  total cycles " << (total ? total.getInt() : 0) << "\n";
+}
 
 int main(int argc, char **argv) {
   llvm::InitLLVM init(argc, argv);
@@ -56,6 +146,11 @@ int main(int argc, char **argv) {
   if (sramSize < 4096 || sramSize > (16 << 20) || sramSize % 4096) {
     llvm::errs() << "knpu-compile: --sram-size must be a multiple of 4096 "
                     "in 4096..16777216\n";
+    return 1;
+  }
+  if (report && outputFile == "-") {
+    llvm::errs() << "knpu-compile: --report prints to stdout; write the "
+                    "output to a file with -o\n";
     return 1;
   }
 
@@ -84,12 +179,19 @@ int main(int argc, char **argv) {
   pm.addPass(knpu::createKnpuImport());
   knpu::KnpuTileOptions tileOptions;
   tileOptions.sramSize = sramSize;
+  tileOptions.overlap = overlap;
   pm.addPass(knpu::createKnpuTile(tileOptions));
   knpu::KnpuScheduleOptions scheduleOptions;
   scheduleOptions.sramSize = sramSize;
+  scheduleOptions.overlap = overlap;
   pm.addPass(knpu::createKnpuSchedule(scheduleOptions));
   if (insertWaits)
     pm.addPass(knpu::createKnpuInsertWaits());
+  knpu::KnpuEstimateOptions estimateOptions;
+  estimateOptions.macsPerCycle = macsPerCycle;
+  estimateOptions.dmaBytesPerCycle = dmaBytesPerCycle;
+  estimateOptions.poolElementsPerCycle = poolElementsPerCycle;
+  pm.addPass(knpu::createKnpuEstimate(estimateOptions));
   if (failed(pm.run(*module)))
     return 1;
 
@@ -103,5 +205,7 @@ int main(int argc, char **argv) {
   else if (failed(knpu::writeModelFile(*module, output->os())))
     return 1;
   output->keep();
+  if (report)
+    printReport(*module, llvm::outs());
   return 0;
 }

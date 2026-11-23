@@ -48,16 +48,33 @@ std::string mlir::knpu::checkWindowShape(const WindowShape &s) {
 
 static bool isInt8(int64_t v) { return v >= -128 && v <= 127; }
 
-static LogicalResult verifyQuant(Operation *op, int64_t inZp, int64_t outZp,
-                                 ArrayRef<int64_t> clamp, StringRef round) {
-  if (!isInt8(inZp) || !isInt8(outZp))
-    return op->emitOpError("zero points must be in -128..127");
+static LogicalResult verifyClamp(Operation *op, ArrayRef<int64_t> clamp) {
   if (clamp.size() != 2 || !isInt8(clamp[0]) || !isInt8(clamp[1]) ||
       clamp[0] > clamp[1])
     return op->emitOpError("clamp must be (min, max) in -128..127 with "
                            "min <= max");
+  return success();
+}
+
+static LogicalResult verifyQuant(Operation *op, int64_t inZp, int64_t outZp,
+                                 ArrayRef<int64_t> clamp, StringRef round) {
+  if (!isInt8(inZp) || !isInt8(outZp))
+    return op->emitOpError("zero points must be in -128..127");
+  if (failed(verifyClamp(op, clamp)))
+    return failure();
   if (round != "double" && round != "single")
     return op->emitOpError("round must be \"double\" or \"single\"");
+  return success();
+}
+
+/// The shapes of a graph-level window operation: input and output must be
+/// static 1xHxWxC tensors.
+static LogicalResult verifyActivations(Operation *op, ShapedType in,
+                                       ShapedType out) {
+  if (!in.hasStaticShape() || !out.hasStaticShape())
+    return op->emitOpError("operands and result must have static shapes");
+  if (in.getDimSize(0) != 1 || out.getDimSize(0) != 1)
+    return op->emitOpError("batch size must be 1");
   return success();
 }
 
@@ -90,8 +107,22 @@ static LogicalResult verifySramRanges(Operation *op, ArrayRef<Range> ranges) {
   return success();
 }
 
+/// SRAM range and overlap checks of an operation command
+/// (docs/npu-spec.md 6.4): everything inside SRAM, and the OFM apart from
+/// everything the command reads.
+static LogicalResult verifyCommandRanges(Operation *op, ArrayRef<Range> reads,
+                                         Range ofm) {
+  if (failed(verifySramRanges(op, reads)) ||
+      failed(verifySramRanges(op, {ofm})))
+    return failure();
+  for (const Range &r : reads)
+    if (ofm.begin < r.begin + r.size && r.begin < ofm.begin + ofm.size)
+      return op->emitOpError() << "OFM overlaps the " << r.what;
+  return success();
+}
+
 //===----------------------------------------------------------------------===//
-// Conv2DOp
+// Graph operations
 //===----------------------------------------------------------------------===//
 
 LogicalResult Conv2DOp::verify() {
@@ -126,6 +157,33 @@ LogicalResult Conv2DOp::verify() {
     return emitOpError(err);
   return verifyQuant(*this, getInputZp(), getOutputZp(), getClamp(),
                      getRound());
+}
+
+LogicalResult AvgPool2DOp::verify() {
+  auto in = getInput().getType();
+  auto out = getOutput().getType();
+  if (failed(verifyActivations(*this, in, out)))
+    return failure();
+  if (out.getDimSize(3) != in.getDimSize(3))
+    return emitOpError("output channels must match the input");
+  if (getKernel().size() != 2 || getStride().size() != 2 ||
+      getPad().size() != 4)
+    return emitOpError("kernel and stride must have 2 values and pad 4");
+
+  WindowShape s{in.getDimSize(1),  in.getDimSize(2),  in.getDimSize(3),
+                out.getDimSize(1), out.getDimSize(2), out.getDimSize(3),
+                getKernel()[0],    getKernel()[1],    getStride()[0],
+                getStride()[1],    getPad()[0],       getPad()[1],
+                getPad()[2],       getPad()[3]};
+  std::string err = checkWindowShape(s);
+  if (!err.empty())
+    return emitOpError(err);
+  return verifyClamp(*this, getClamp());
+}
+
+LogicalResult CpuOp::verify() {
+  return verifyActivations(*this, getInput().getType(),
+                           getOutput().getType());
 }
 
 //===----------------------------------------------------------------------===//
@@ -169,25 +227,39 @@ LogicalResult ConvOp::verify() {
   if (failed(verifyQuant(*this, getIfmZp(), getOfmZp(), getClamp(),
                          getRound())))
     return failure();
-  int64_t ifmBase = getIfm(), ofmBase = getOfm(), weight = getWeight(),
+  int64_t ifm = getIfm(), ofm = getOfm(), weight = getWeight(),
           bias = getBias(), rq = getRqTable();
   if (bias % 4 || rq % 4)
     return emitOpError("bias and requantization table offsets must be "
                        "multiples of 4");
+  return verifyCommandRanges(*this,
+                             {{ifm, s.ih * s.iw * s.ic, "IFM"},
+                              {weight, s.oc * s.kh * s.kw * s.ic, "weights"},
+                              {bias, 4 * s.oc, "bias"},
+                              {rq, 8 * s.oc, "requantization table"}},
+                             {ofm, s.oh * s.ow * s.oc, "OFM"});
+}
 
-  Range ifm{ifmBase, s.ih * s.iw * s.ic, "IFM"};
-  Range ofm{ofmBase, s.oh * s.ow * s.oc, "OFM"};
-  Range reads[] = {ifm,
-                   {weight, s.oc * s.kh * s.kw * s.ic, "weights"},
-                   {bias, 4 * s.oc, "bias"},
-                   {rq, 8 * s.oc, "requantization table"}};
-  if (failed(verifySramRanges(*this, reads)) ||
-      failed(verifySramRanges(*this, {ofm})))
+LogicalResult PoolOp::verify() {
+  if (getIfmShape().size() != 3 || getOfmShape().size() != 3 ||
+      getKernel().size() != 2 || getStride().size() != 2 ||
+      getPad().size() != 4)
+    return emitOpError("shapes need 3 values, kernel and stride 2, pad 4");
+  WindowShape s{getIfmShape()[0], getIfmShape()[1], getIfmShape()[2],
+                getOfmShape()[0], getOfmShape()[1], getOfmShape()[2],
+                getKernel()[0],   getKernel()[1],   getStride()[0],
+                getStride()[1],   getPad()[0],      getPad()[1],
+                getPad()[2],      getPad()[3]};
+  std::string err = checkWindowShape(s);
+  if (!err.empty())
+    return emitOpError(err);
+  if (s.oc != s.ic)
+    return emitOpError("output channels must match the input");
+  if (failed(verifyClamp(*this, getClamp())))
     return failure();
-  for (const Range &r : reads)
-    if (ofm.begin < r.begin + r.size && r.begin < ofm.begin + ofm.size)
-      return emitOpError() << "OFM overlaps the " << r.what;
-  return success();
+  int64_t ifm = getIfm(), ofm = getOfm();
+  return verifyCommandRanges(*this, {{ifm, s.ih * s.iw * s.ic, "IFM"}},
+                             {ofm, s.oh * s.ow * s.oc, "OFM"});
 }
 
 LogicalResult DmaWaitOp::verify() {
@@ -247,5 +319,25 @@ LogicalResult IoOp::verify() {
   int64_t region = getRegion(), offset = getOffset();
   if (region < 0 || region > 7 || offset < 0 || offset > 0xFFFFFFFFll)
     return emitOpError("bad region or offset");
+  return success();
+}
+
+LogicalResult CpuStepOp::verify() {
+  StringRef kind = getKind();
+  bool copy = kind == "copy_in" || kind == "copy_out";
+  if (!copy && kind != "call")
+    return emitOpError("kind must be \"copy_in\", \"call\" or \"copy_out\"");
+  if (!copy) {
+    if (getOffset() || getSize())
+      return emitOpError("a call has no arena offset or size");
+    return success();
+  }
+  if (!getOffset() || !getSize())
+    return emitOpError("a copy needs an arena offset and a size");
+  int64_t offset = *getOffset(), size = *getSize();
+  if (offset < 0 || offset > 0xFFFFFFFFll)
+    return emitOpError("arena offset must be in 0..2^32-1");
+  if (size < 1 || size > 0xFFFFFFFFll)
+    return emitOpError("size must be in 1..2^32-1");
   return success();
 }

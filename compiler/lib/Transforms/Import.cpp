@@ -3,8 +3,9 @@
 //
 // knpu-import: builds the graph form from the #pragma knpu attributes that
 // lcc puts on functions (docs/design.md 9.3). The pass never looks at the
-// function bodies; the C loops in them are only for running the same model
-// on a CPU.
+// function bodies: the C loops of the NPU layers are only for running the
+// same model on a CPU, and the functions of cpu layers stay for the CPU
+// code.
 
 #include "knpu/Transforms/Passes.h"
 
@@ -134,84 +135,62 @@ static int32_t readLE32(const std::string &bytes, size_t i) {
   return static_cast<int32_t>(v);
 }
 
-/// One `#pragma knpu conv2d` layer, checked.
-struct ConvLayer {
+static bool isInt8(int64_t v) { return v >= -128 && v <= 127; }
+
+static int64_t elements(ArrayRef<int64_t> hwc) {
+  return hwc[0] * hwc[1] * hwc[2];
+}
+
+enum class Kind { Conv, Fc, AvgPool, Reshape, Cpu };
+
+/// One layer function, checked. Shapes are (H, W, C); a fully connected
+/// layer's are (1, 1, size), with a 1x1 kernel.
+struct Layer {
+  Kind kind;
   func::FuncOp func;
+  StringRef op; // pragma operation
   StringRef in, out;
   SmallVector<int64_t> inShape, outShape, kernel, stride, pad, clamp;
-  int64_t inZp = 0, outZp = 0;
+  int64_t inZp = 0, outZp = 0; // a reshape's come from its input
   std::vector<int8_t> weight;
   std::vector<int32_t> bias, rq; // rq: multiplier, shift per channel
   SmallVector<LLVM::GlobalOp> globals;
+
+  bool onNpu() const { return kind != Kind::Cpu; }
+  /// The key that holds the input zero point
+  StringRef inZpKey() const { return kind == Kind::AvgPool ? "zp" : "in_zp"; }
 };
 
-static bool isInt8(int64_t v) { return v >= -128 && v <= 127; }
-
-class ImportPass : public knpu::impl::KnpuImportBase<ImportPass> {
-public:
-  void runOnOperation() override;
-
-private:
-  FailureOr<ConvLayer> readConv(func::FuncOp func, PragmaArgs &args);
-  void eraseDeadInternalSymbols(ModuleOp module);
-};
-
-FailureOr<ConvLayer> ImportPass::readConv(func::FuncOp func,
-                                          PragmaArgs &args) {
-  ConvLayer l;
-  l.func = func;
-  if (failed(args.expectKeys({"in", "out", "w", "bias", "mult", "shift",
-                              "in_shape", "out_shape", "kernel", "stride",
-                              "pad", "in_zp", "out_zp", "clamp"})))
+/// in and out: writable arrays of the layer's shapes.
+static LogicalResult readActivations(PragmaArgs &args, Layer &l) {
+  auto in = args.global("in"), out = args.global("out");
+  if (failed(in) || failed(out))
     return failure();
-
-  auto in = args.global("in"), out = args.global("out"), w = args.global("w"),
-       bias = args.global("bias"), mult = args.global("mult"),
-       shift = args.global("shift");
-  auto inShape = args.list("in_shape", 3), outShape = args.list("out_shape", 3),
-       kernel = args.list("kernel", 2), stride = args.list("stride", 2),
-       pad = args.list("pad", 4), clamp = args.list("clamp", 2);
-  auto inZp = args.integer("in_zp"), outZp = args.integer("out_zp");
-  if (failed(in) || failed(out) || failed(w) || failed(bias) ||
-      failed(mult) || failed(shift) || failed(inShape) || failed(outShape) ||
-      failed(kernel) || failed(stride) || failed(pad) || failed(clamp) ||
-      failed(inZp) || failed(outZp))
-    return failure();
-
   l.in = in->getSymName();
   l.out = out->getSymName();
   if (l.in == l.out)
     return args.error() << "'in' and 'out' must be different arrays";
-  l.inShape = *inShape;
-  l.outShape = *outShape;
-  l.kernel = *kernel;
-  l.stride = *stride;
-  l.pad = *pad;
-  l.clamp = *clamp;
-  l.inZp = *inZp;
-  l.outZp = *outZp;
-  if (!isInt8(l.inZp) || !isInt8(l.outZp))
-    return args.error() << "zero points must be in -128..127";
-  for (int64_t v : llvm::concat<int64_t>(l.inShape, l.outShape, l.kernel,
-                                         l.stride))
-    if (v < 1)
-      return args.error() << "shapes, kernel and stride must be positive";
-
-  int64_t ic = l.inShape[2], oc = l.outShape[2];
-  int64_t kh = l.kernel[0], kw = l.kernel[1];
-
-  // Activations: writable signed char arrays of the given shapes
-  for (auto [key, g, shape] :
-       {std::tuple{"in", *in, &l.inShape}, std::tuple{"out", *out, &l.outShape}}) {
-    int64_t n = (*shape)[0] * (*shape)[1] * (*shape)[2];
+  for (auto [key, g, shape] : {std::tuple{"in", *in, &l.inShape},
+                               std::tuple{"out", *out, &l.outShape}}) {
+    int64_t n = elements(*shape);
     if (g.getConstant())
       return args.error(key) << "must not be const";
     auto size = byteSize(g.getGlobalType());
     if (!size || *size != n)
       return args.error(key) << "must be an array of " << n << " bytes";
   }
+  l.globals.append({*in, *out});
+  return success();
+}
 
-  // Constants: const arrays with an initializer of the expected size
+/// w, bias, mult and shift: const arrays with initializers of the sizes the
+/// layer's shapes give.
+static LogicalResult readConstants(PragmaArgs &args, Layer &l,
+                                   int64_t weightBytes) {
+  auto w = args.global("w"), bias = args.global("bias"),
+       mult = args.global("mult"), shift = args.global("shift");
+  if (failed(w) || failed(bias) || failed(mult) || failed(shift))
+    return failure();
   auto bytesOf = [&](StringRef key, LLVM::GlobalOp g,
                      int64_t size) -> std::optional<std::string> {
     auto gsize = byteSize(g.getGlobalType());
@@ -224,7 +203,8 @@ FailureOr<ConvLayer> ImportPass::readConv(func::FuncOp func,
       args.error(key) << "must have an initializer";
     return bytes;
   };
-  auto wBytes = bytesOf("w", *w, oc * kh * kw * ic);
+  int64_t oc = l.outShape[2];
+  auto wBytes = bytesOf("w", *w, weightBytes);
   auto bBytes = bytesOf("bias", *bias, 4 * oc);
   auto mBytes = bytesOf("mult", *mult, 4 * oc);
   auto sBytes = bytesOf("shift", *shift, 4 * oc);
@@ -242,9 +222,161 @@ FailureOr<ConvLayer> ImportPass::readConv(func::FuncOp func,
     l.rq.push_back(m);
     l.rq.push_back(s);
   }
-  l.globals = {*in, *out, *w, *bias, *mult, *shift};
+  l.globals.append({*w, *bias, *mult, *shift});
+  return success();
+}
+
+static LogicalResult checkZeroPoints(PragmaArgs &args, const Layer &l) {
+  if (!isInt8(l.inZp) || !isInt8(l.outZp))
+    return args.error() << "zero points must be in -128..127";
+  return success();
+}
+
+static LogicalResult checkPositive(PragmaArgs &args,
+                                   ArrayRef<SmallVector<int64_t>> lists,
+                                   StringRef what) {
+  for (const SmallVector<int64_t> &list : lists)
+    for (int64_t v : list)
+      if (v < 1)
+        return args.error() << what << " must be positive";
+  return success();
+}
+
+/// #pragma knpu conv2d
+static FailureOr<Layer> readConv(PragmaArgs &args, Layer l) {
+  if (failed(args.expectKeys({"in", "out", "w", "bias", "mult", "shift",
+                              "in_shape", "out_shape", "kernel", "stride",
+                              "pad", "in_zp", "out_zp", "clamp"})))
+    return failure();
+  auto inShape = args.list("in_shape", 3), outShape = args.list("out_shape", 3),
+       kernel = args.list("kernel", 2), stride = args.list("stride", 2),
+       pad = args.list("pad", 4), clamp = args.list("clamp", 2);
+  auto inZp = args.integer("in_zp"), outZp = args.integer("out_zp");
+  if (failed(inShape) || failed(outShape) || failed(kernel) ||
+      failed(stride) || failed(pad) || failed(clamp) || failed(inZp) ||
+      failed(outZp))
+    return failure();
+  l.inShape = *inShape;
+  l.outShape = *outShape;
+  l.kernel = *kernel;
+  l.stride = *stride;
+  l.pad = *pad;
+  l.clamp = *clamp;
+  l.inZp = *inZp;
+  l.outZp = *outZp;
+  if (failed(checkZeroPoints(args, l)) ||
+      failed(checkPositive(args, {l.inShape, l.outShape, l.kernel, l.stride},
+                           "shapes, kernel and stride")) ||
+      failed(readActivations(args, l)) ||
+      failed(readConstants(args, l,
+                           l.outShape[2] * l.kernel[0] * l.kernel[1] *
+                               l.inShape[2])))
+    return failure();
   return l;
 }
+
+/// #pragma knpu fc: a 1x1 convolution of a 1x1xIN input (docs/design.md
+/// D7). The weights [OUT, IN] are already OHWI.
+static FailureOr<Layer> readFc(PragmaArgs &args, Layer l) {
+  if (failed(args.expectKeys({"in", "out", "w", "bias", "mult", "shift",
+                              "in_size", "out_size", "in_zp", "out_zp",
+                              "clamp"})))
+    return failure();
+  auto inSize = args.integer("in_size"), outSize = args.integer("out_size"),
+       inZp = args.integer("in_zp"), outZp = args.integer("out_zp");
+  auto clamp = args.list("clamp", 2);
+  if (failed(inSize) || failed(outSize) || failed(inZp) || failed(outZp) ||
+      failed(clamp))
+    return failure();
+  l.inShape = {1, 1, *inSize};
+  l.outShape = {1, 1, *outSize};
+  l.kernel = {1, 1};
+  l.stride = {1, 1};
+  l.pad = {0, 0, 0, 0};
+  l.clamp = *clamp;
+  l.inZp = *inZp;
+  l.outZp = *outZp;
+  if (failed(checkZeroPoints(args, l)) ||
+      failed(checkPositive(args, {l.inShape, l.outShape}, "sizes")) ||
+      failed(readActivations(args, l)) ||
+      failed(readConstants(args, l, *outSize * *inSize)))
+    return failure();
+  return l;
+}
+
+/// #pragma knpu avgpool
+static FailureOr<Layer> readAvgPool(PragmaArgs &args, Layer l) {
+  if (failed(args.expectKeys({"in", "out", "in_shape", "out_shape", "kernel",
+                              "stride", "pad", "zp", "clamp"})))
+    return failure();
+  auto inShape = args.list("in_shape", 3), outShape = args.list("out_shape", 3),
+       kernel = args.list("kernel", 2), stride = args.list("stride", 2),
+       pad = args.list("pad", 4), clamp = args.list("clamp", 2);
+  auto zp = args.integer("zp");
+  if (failed(inShape) || failed(outShape) || failed(kernel) ||
+      failed(stride) || failed(pad) || failed(clamp) || failed(zp))
+    return failure();
+  l.inShape = *inShape;
+  l.outShape = *outShape;
+  l.kernel = *kernel;
+  l.stride = *stride;
+  l.pad = *pad;
+  l.clamp = *clamp;
+  l.inZp = l.outZp = *zp;
+  if (failed(checkZeroPoints(args, l)) ||
+      failed(checkPositive(args, {l.inShape, l.outShape, l.kernel, l.stride},
+                           "shapes, kernel and stride")) ||
+      failed(readActivations(args, l)))
+    return failure();
+  return l;
+}
+
+/// #pragma knpu reshape: the same bytes in another shape
+static FailureOr<Layer> readReshape(PragmaArgs &args, Layer l) {
+  if (failed(args.expectKeys({"in", "out", "in_shape", "out_shape"})))
+    return failure();
+  auto inShape = args.list("in_shape", 3), outShape = args.list("out_shape", 3);
+  if (failed(inShape) || failed(outShape))
+    return failure();
+  l.inShape = *inShape;
+  l.outShape = *outShape;
+  if (failed(checkPositive(args, {l.inShape, l.outShape}, "shapes")))
+    return failure();
+  if (elements(l.inShape) != elements(l.outShape))
+    return args.error() << "'in_shape' and 'out_shape' must have the same "
+                           "number of elements";
+  if (failed(readActivations(args, l)))
+    return failure();
+  return l;
+}
+
+/// #pragma knpu cpu: only the inputs and outputs of a CPU layer
+static FailureOr<Layer> readCpu(PragmaArgs &args, Layer l) {
+  if (failed(args.expectKeys(
+          {"in", "out", "in_shape", "out_shape", "in_zp", "out_zp"})))
+    return failure();
+  auto inShape = args.list("in_shape", 3), outShape = args.list("out_shape", 3);
+  auto inZp = args.integer("in_zp"), outZp = args.integer("out_zp");
+  if (failed(inShape) || failed(outShape) || failed(inZp) || failed(outZp))
+    return failure();
+  l.inShape = *inShape;
+  l.outShape = *outShape;
+  l.inZp = *inZp;
+  l.outZp = *outZp;
+  if (failed(checkZeroPoints(args, l)) ||
+      failed(checkPositive(args, {l.inShape, l.outShape}, "shapes")) ||
+      failed(readActivations(args, l)))
+    return failure();
+  return l;
+}
+
+class ImportPass : public knpu::impl::KnpuImportBase<ImportPass> {
+public:
+  void runOnOperation() override;
+
+private:
+  void eraseDeadInternalSymbols(ModuleOp module);
+};
 
 void ImportPass::runOnOperation() {
   ModuleOp module = getOperation();
@@ -260,7 +392,7 @@ void ImportPass::runOnOperation() {
 
   // The marked functions
   func::FuncOp model;
-  llvm::StringMap<func::FuncOp> layers;
+  llvm::StringMap<func::FuncOp> marked;
   for (auto func : module.getOps<func::FuncOp>()) {
     auto op = func->getAttrOfType<StringAttr>(kOpAttr);
     if (!op)
@@ -272,7 +404,7 @@ void ImportPass::runOnOperation() {
       }
       model = func;
     } else {
-      layers[func.getSymName()] = func;
+      marked[func.getSymName()] = func;
     }
   }
   if (!model) {
@@ -338,28 +470,55 @@ void ImportPass::runOnOperation() {
     }
   }
 
-  std::vector<ConvLayer> convs;
+  // The layers in call order; cpu layers only after the last NPU layer
+  std::vector<Layer> layers;
+  bool afterCpu = false;
   for (func::CallOp call : calls) {
-    auto it = layers.find(call.getCallee());
-    if (it == layers.end()) {
+    auto it = marked.find(call.getCallee());
+    if (it == marked.end()) {
       call.emitError() << "'" << call.getCallee()
                        << "' is not a #pragma knpu layer function";
       return signalPassFailure();
     }
     func::FuncOp f = it->second;
     StringRef op = f->getAttrOfType<StringAttr>(kOpAttr).getValue();
-    if (op != "conv2d") {
+    PragmaArgs args(f, op, argsOf(f), symbols);
+    Layer l;
+    l.func = f;
+    l.op = op;
+    FailureOr<Layer> layer = failure();
+    if (op == "conv2d") {
+      l.kind = Kind::Conv;
+      layer = readConv(args, l);
+    } else if (op == "fc") {
+      l.kind = Kind::Fc;
+      layer = readFc(args, l);
+    } else if (op == "avgpool") {
+      l.kind = Kind::AvgPool;
+      layer = readAvgPool(args, l);
+    } else if (op == "reshape") {
+      l.kind = Kind::Reshape;
+      layer = readReshape(args, l);
+    } else if (op == "cpu") {
+      l.kind = Kind::Cpu;
+      layer = readCpu(args, l);
+    } else {
       f.emitError() << "#pragma knpu " << op << " is not supported";
       return signalPassFailure();
     }
-    PragmaArgs args(f, op, argsOf(f), symbols);
-    auto layer = readConv(f, args);
     if (failed(layer))
       return signalPassFailure();
-    convs.push_back(std::move(*layer));
+    if (layer->onNpu() && afterCpu) {
+      args.error() << "comes after a cpu layer; cpu layers must follow the "
+                      "last NPU layer";
+      return signalPassFailure();
+    }
+    afterCpu |= !layer->onNpu();
+    layers.push_back(std::move(*layer));
   }
-  for (auto &entry : layers)
-    if (llvm::none_of(convs, [&](auto &l) { return l.func == entry.second; })) {
+  for (auto &entry : marked)
+    if (llvm::none_of(layers,
+                      [&](auto &l) { return l.func == entry.second; })) {
       func::FuncOp f = entry.second;
       f.emitError("#pragma knpu layer function is not called by the model "
                   "function");
@@ -375,11 +534,13 @@ void ImportPass::runOnOperation() {
   llvm::StringMap<Tensor> live;
   StringRef inName = mIn->getSymName(), outName = mOut->getSymName();
   std::optional<SmallVector<int64_t>> inShape;
-  for (auto [i, l] : llvm::enumerate(convs)) {
-    PragmaArgs args(l.func, "conv2d", argsOf(l.func), symbols);
+  for (auto [i, l] : llvm::enumerate(layers)) {
+    PragmaArgs args(l.func, l.op, argsOf(l.func), symbols);
     if (l.in == inName && !live.count(inName)) {
-      if (l.inZp != *mInZp) {
-        args.error("in_zp") << "differs from in_zp of the model";
+      if (l.kind == Kind::Reshape) {
+        l.inZp = *mInZp;
+      } else if (l.inZp != *mInZp) {
+        args.error(l.inZpKey()) << "differs from in_zp of the model";
         return signalPassFailure();
       }
       inShape = l.inShape;
@@ -391,7 +552,13 @@ void ImportPass::runOnOperation() {
                           "earlier layer";
       return signalPassFailure();
     }
-    if (it->second.shape != l.inShape || it->second.zp != l.inZp) {
+    // A fully connected layer reads the bytes of any shape as its vector
+    bool shapeOk = l.kind == Kind::Fc
+                       ? elements(it->second.shape) == l.inShape[2]
+                       : it->second.shape == l.inShape;
+    if (l.kind == Kind::Reshape)
+      l.inZp = l.outZp = it->second.zp;
+    if (!shapeOk || it->second.zp != l.inZp) {
       args.error("in") << "shape or zero point differs from where '" << l.in
                        << "' was written";
       return signalPassFailure();
@@ -433,42 +600,85 @@ void ImportPass::runOnOperation() {
   b.setInsertionPointToStart(fn.addEntryBlock());
   llvm::StringMap<Value> values;
   values[inName] = fn.getArgument(0);
-  for (ConvLayer &l : convs) {
-    Location lloc = l.func.getLoc();
-    int64_t oc = l.outShape[2];
-    auto constant = [&](RankedTensorType t, auto data) {
-      return arith::ConstantOp::create(
-                 b, lloc, DenseElementsAttr::get(t, llvm::ArrayRef(data)))
-          .getResult();
+  for (Layer &l : layers) {
+    // The layer function's name stays in the location of everything the
+    // layer becomes, down to its commands
+    Location lloc =
+        NameLoc::get(b.getStringAttr(l.func.getSymName()), l.func.getLoc());
+    auto reshape = [&](Value v, RankedTensorType type) -> Value {
+      if (v.getType() == type)
+        return v;
+      Value shape =
+          arith::ConstantOp::create(b, lloc, b.getIndexTensorAttr(
+                                                 type.getShape()));
+      return tensor::ReshapeOp::create(b, lloc, type, v, shape);
     };
-    Value w = constant(
-        RankedTensorType::get({oc, l.kernel[0], l.kernel[1], l.inShape[2]}, i8),
-        l.weight);
-    Value bias = constant(RankedTensorType::get({oc}, i32), l.bias);
-    Value rq = constant(RankedTensorType::get({oc, 2}, i32), l.rq);
-    auto conv = Conv2DOp::create(
-        b, lloc, actType(l.outShape), values[l.in], w, bias, rq,
-        b.getDenseI64ArrayAttr(l.stride), b.getDenseI64ArrayAttr(l.pad),
-        b.getI64IntegerAttr(l.inZp), b.getI64IntegerAttr(l.outZp),
-        b.getDenseI64ArrayAttr(l.clamp), b.getStringAttr(*round));
-    if (failed(verify(conv)))
+    Value in = values[l.in], out;
+    switch (l.kind) {
+    case Kind::Conv:
+    case Kind::Fc: {
+      int64_t oc = l.outShape[2];
+      auto constant = [&](RankedTensorType t, auto data) {
+        return arith::ConstantOp::create(
+                   b, lloc, DenseElementsAttr::get(t, llvm::ArrayRef(data)))
+            .getResult();
+      };
+      Value w = constant(RankedTensorType::get(
+                             {oc, l.kernel[0], l.kernel[1], l.inShape[2]}, i8),
+                         l.weight);
+      Value bias = constant(RankedTensorType::get({oc}, i32), l.bias);
+      Value rq = constant(RankedTensorType::get({oc, 2}, i32), l.rq);
+      out = Conv2DOp::create(
+          b, lloc, actType(l.outShape), reshape(in, actType(l.inShape)), w,
+          bias, rq, b.getDenseI64ArrayAttr(l.stride),
+          b.getDenseI64ArrayAttr(l.pad), b.getI64IntegerAttr(l.inZp),
+          b.getI64IntegerAttr(l.outZp), b.getDenseI64ArrayAttr(l.clamp),
+          b.getStringAttr(*round));
+      break;
+    }
+    case Kind::AvgPool:
+      out = AvgPool2DOp::create(b, lloc, actType(l.outShape), in,
+                                b.getDenseI64ArrayAttr(l.kernel),
+                                b.getDenseI64ArrayAttr(l.stride),
+                                b.getDenseI64ArrayAttr(l.pad),
+                                b.getDenseI64ArrayAttr(l.clamp));
+      break;
+    case Kind::Reshape:
+      out = reshape(in, actType(l.outShape));
+      break;
+    case Kind::Cpu:
+      out = CpuOp::create(b, lloc, actType(l.outShape), in,
+                          FlatSymbolRefAttr::get(l.func.getSymNameAttr()),
+                          FlatSymbolRefAttr::get(ctx, l.in),
+                          FlatSymbolRefAttr::get(ctx, l.out));
+      break;
+    }
+    if (Operation *def = out.getDefiningOp(); def && failed(verify(def)))
       return signalPassFailure();
-    values[l.out] = conv.getResult();
+    values[l.out] = out;
   }
   func::ReturnOp::create(b, loc, ValueRange{values[outName]});
 
-  // Remove what the graph replaced
+  // Remove what the graph replaced. The functions of cpu layers stay for
+  // the CPU code, with external linkage so that it exports them.
   SetVector<Operation *> globals;
   globals.insert(*mIn);
   globals.insert(*mOut);
   globals.insert(*mInScale);
   globals.insert(*mOutScale);
-  for (ConvLayer &l : convs)
+  for (Layer &l : layers)
     for (LLVM::GlobalOp g : l.globals)
       globals.insert(g);
   model.erase();
-  for (auto &entry : layers) {
+  for (auto &entry : marked) {
     func::FuncOp f = entry.second;
+    if (f->getAttrOfType<StringAttr>(kOpAttr).getValue() == "cpu") {
+      f->removeAttr(kOpAttr);
+      f->removeAttr(kArgsAttr);
+      f->setAttr("llvm.linkage",
+                 LLVM::LinkageAttr::get(ctx, LLVM::Linkage::External));
+      continue;
+    }
     if (!SymbolTable::symbolKnownUseEmpty(f, module)) {
       f.emitError("#pragma knpu layer function is also used outside the "
                   "model function");

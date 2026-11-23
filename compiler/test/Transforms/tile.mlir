@@ -3,11 +3,13 @@
 // RUN: knpu-opt %s -split-input-file --knpu-tile=sram-size=65536 | FileCheck %s --check-prefix=BIG
 // RUN: not knpu-opt %s -split-input-file --knpu-tile=sram-size=4096 2> %t.err | FileCheck %s --check-prefix=SMALL
 // RUN: FileCheck %s --check-prefix=ERR < %t.err
+// RUN: not knpu-opt %s -split-input-file --knpu-tile="sram-size=4096 overlap=false" 2>/dev/null | FileCheck %s --check-prefix=SERIAL
 
 // The test model's layer (14x14x8 -> 16, 3x3, SAME): constants 1,344
 // bytes, input 1,568, output 3,136. In 64 KiB it stays whole. In 4 KiB,
 // two input and two output buffers of a 3-row tile fit (5 input rows):
-// 1344 + 2 * 560 + 2 * 672 = 3808 bytes.
+// 1344 + 2 * 560 + 2 * 672 = 3808 bytes. Without overlap one buffer each
+// of a 7-row tile fits (9 input rows): 1344 + 1008 + 1568 = 3920 bytes.
 
 func.func @conv(%in: tensor<1x14x14x8xi8>, %w: tensor<16x3x3x8xi8>,
                 %b: tensor<16xi32>, %rq: tensor<16x2xi32>)
@@ -41,6 +43,14 @@ func.func @conv(%in: tensor<1x14x14x8xi8>, %w: tensor<16x3x3x8xi8>,
 // SMALL: knpu.conv2d %[[S4]], {{.*}}pad = array<i64: 0, 1, 1, 1>{{.*}} -> tensor<1x2x14x16xi8>
 // SMALL: %[[R4:.*]] = tensor.insert_slice {{.*}}[0, 12, 0, 0] [1, 2, 14, 16]
 // SMALL: return %[[R4]]
+
+// SERIAL-LABEL: func.func @conv
+// SERIAL: tensor.extract_slice %arg0[0, 0, 0, 0] [1, 8, 14, 8]
+// SERIAL: knpu.conv2d {{.*}} -> tensor<1x7x14x16xi8>
+// SERIAL: tensor.extract_slice %arg0[0, 6, 0, 0] [1, 8, 14, 8]
+// SERIAL: knpu.conv2d {{.*}} -> tensor<1x7x14x16xi8>
+// SERIAL-NOT: knpu.conv2d
+// SERIAL: return
 
 // -----
 
@@ -91,4 +101,60 @@ func.func @too_big(%in: tensor<1x8x8x64xi8>, %w: tensor<64x3x3x64xi8>,
 }
 
 // BIG-LABEL: func.func @too_big
+// BIG-NOT: tensor.extract_slice
+
+// -----
+
+// Average pooling (32x32x4 -> 16x16x4, 2x2, stride 2) tiles like a
+// convolution without constants. In 4 KiB a tile of t output rows needs
+// 2 * 256t + 2 * 64t bytes double-buffered (t = 6) and 256t + 64t with one
+// buffer each (t = 12).
+
+func.func @pool(%in: tensor<1x32x32x4xi8>) -> tensor<1x16x16x4xi8> {
+  %0 = knpu.avgpool %in {kernel = array<i64: 2, 2>, stride = array<i64: 2, 2>,
+      pad = array<i64: 0, 0, 0, 0>, clamp = array<i64: -128, 127>}
+      : (tensor<1x32x32x4xi8>) -> tensor<1x16x16x4xi8>
+  return %0 : tensor<1x16x16x4xi8>
+}
+
+// BIG-LABEL: func.func @pool
+// BIG-NOT: tensor.extract_slice
+// BIG: knpu.avgpool %arg0
+
+// SMALL-LABEL: func.func @pool
+// SMALL: tensor.extract_slice %arg0[0, 0, 0, 0] [1, 12, 32, 4]
+// SMALL: knpu.avgpool {{.*}} -> tensor<1x6x16x4xi8>
+// SMALL: tensor.extract_slice %arg0[0, 12, 0, 0] [1, 12, 32, 4]
+// SMALL: knpu.avgpool {{.*}} -> tensor<1x6x16x4xi8>
+// SMALL: tensor.extract_slice %arg0[0, 24, 0, 0] [1, 8, 32, 4]
+// SMALL: knpu.avgpool {{.*}} -> tensor<1x4x16x4xi8>
+// SMALL-NOT: knpu.avgpool
+// SMALL: return
+
+// SERIAL-LABEL: func.func @pool
+// SERIAL: tensor.extract_slice %arg0[0, 0, 0, 0] [1, 24, 32, 4]
+// SERIAL: knpu.avgpool {{.*}} -> tensor<1x12x16x4xi8>
+// SERIAL: tensor.extract_slice %arg0[0, 24, 0, 0] [1, 8, 32, 4]
+// SERIAL: knpu.avgpool {{.*}} -> tensor<1x4x16x4xi8>
+// SERIAL-NOT: knpu.avgpool
+// SERIAL: return
+
+// -----
+
+// A fully connected layer (a 1x1 convolution with one output row) is not
+// split: its weights alone (8,192 bytes) exceed 4 KiB.
+
+func.func @fc_too_big(%in: tensor<1x1x1x4096xi8>, %w: tensor<2x1x1x4096xi8>,
+                      %b: tensor<2xi32>, %rq: tensor<2x2xi32>)
+    -> tensor<1x1x1x2xi8> {
+  // ERR: does not fit in 4096 bytes of SRAM even with one output row per tile
+  %0 = knpu.conv2d %in, %w, %b, %rq {stride = array<i64: 1, 1>,
+      pad = array<i64: 0, 0, 0, 0>, input_zp = 0 : i64,
+      output_zp = 0 : i64, clamp = array<i64: -128, 127>, round = "double"}
+      : (tensor<1x1x1x4096xi8>, tensor<2x1x1x4096xi8>, tensor<2xi32>,
+         tensor<2x2xi32>) -> tensor<1x1x1x2xi8>
+  return %0 : tensor<1x1x1x2xi8>
+}
+
+// BIG-LABEL: func.func @fc_too_big
 // BIG-NOT: tensor.extract_slice

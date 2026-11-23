@@ -86,3 +86,115 @@ llvm.mlir.global external @"a2"() {alignment = 1 : i64} : !llvm.array<8 x i8>
 // CHECK: %[[A1:.*]] = knpu.conv2d %[[IN]], %{{.*}}, %{{.*}}, %{{.*}} {{{.*}}output_zp = 3 : i64{{.*}}round = "single"{{.*}}} : {{.*}} -> tensor<1x2x2x2xi8>
 // CHECK: %[[A2:.*]] = knpu.conv2d %[[A1]], %{{.*}}, %{{.*}}, %{{.*}} {clamp = array<i64: 0, 127>, input_zp = 3 : i64
 // CHECK: return %[[A2]]
+
+// -----
+
+// avgpool, reshape, fc and a cpu layer. The fc layer becomes a 1x1
+// knpu.conv2d of the reshaped 1x1x1x4 input; its weights [2, 4] are the
+// OHWI tensor 2x1x1x4. The cpu layer becomes knpu.cpu; its function stays
+// for the CPU code, with external linkage and without the pragma, and so do
+// the helper it calls and the arrays it uses.
+
+module {
+llvm.mlir.global internal constant @"W3"("\01\02\03\04\FF\FE\FD\FC") {alignment = 1 : i64} : !llvm.array<8 x i8>
+llvm.mlir.global internal constant @"B3"("\0A\00\00\00\F6\FF\FF\FF") {alignment = 4 : i64} : !llvm.array<8 x i8>
+llvm.mlir.global internal constant @"M3"("\00\00\00@\00\00\00@") {alignment = 4 : i64} : !llvm.array<8 x i8>
+llvm.mlir.global internal constant @"S3"("\FE\FF\FF\FF\FD\FF\FF\FF") {alignment = 4 : i64} : !llvm.array<8 x i8>
+llvm.mlir.global internal constant @"SC"(0x3F800000 : f32) {alignment = 4 : i64} : f32
+llvm.mlir.global internal constant @"SC4"(0x3B800000 : f32) {alignment = 4 : i64} : f32
+func.func @"pool_helper"(%a0: i32) -> i32 attributes {llvm.linkage = #llvm.linkage<internal>} {
+  func.return %a0 : i32
+}
+func.func @"cpu_helper"(%a0: i32) -> i32 attributes {llvm.linkage = #llvm.linkage<internal>} {
+  func.return %a0 : i32
+}
+func.func @"l1"() attributes {llvm.linkage = #llvm.linkage<internal>, knpu.op = "avgpool", knpu.args = {in = @"a0", out = @"a1", in_shape = array<i64: 4, 4, 1>, out_shape = array<i64: 2, 2, 1>, kernel = array<i64: 2, 2>, stride = array<i64: 2, 2>, pad = array<i64: 0, 0, 0, 0>, zp = -128 : i64, clamp = array<i64: -128, 127>}} {
+  %c1 = arith.constant 1 : i32
+  %r = func.call @"pool_helper"(%c1) : (i32) -> i32
+  func.return
+}
+func.func @"l2"() attributes {llvm.linkage = #llvm.linkage<internal>, knpu.op = "reshape", knpu.args = {in = @"a1", out = @"a2", in_shape = array<i64: 2, 2, 1>, out_shape = array<i64: 1, 1, 4>}} {
+  func.return
+}
+func.func @"l3"() attributes {llvm.linkage = #llvm.linkage<internal>, knpu.op = "fc", knpu.args = {in = @"a2", out = @"a3", w = @"W3", bias = @"B3", mult = @"M3", shift = @"S3", in_size = 4 : i64, out_size = 2 : i64, in_zp = -128 : i64, out_zp = 5 : i64, clamp = array<i64: -128, 127>}} {
+  func.return
+}
+func.func @"l4"() attributes {llvm.linkage = #llvm.linkage<internal>, knpu.op = "cpu", knpu.args = {in = @"a3", out = @"a4", in_shape = array<i64: 1, 1, 2>, out_shape = array<i64: 1, 1, 2>, in_zp = 5 : i64, out_zp = -128 : i64}} {
+  %p = llvm.mlir.addressof @"a3" : !llvm.ptr
+  %q = llvm.mlir.addressof @"a4" : !llvm.ptr
+  %v = llvm.load %p : !llvm.ptr -> i8
+  llvm.store %v, %q : i8, !llvm.ptr
+  %c1 = arith.constant 1 : i32
+  %r = func.call @"cpu_helper"(%c1) : (i32) -> i32
+  func.return
+}
+func.func @"knpu_model"() attributes {knpu.op = "model", knpu.args = {in = @"a0", out = @"a4", in_scale = @"SC", in_zp = -128 : i64, out_scale = @"SC4", out_zp = -128 : i64, round = "single"}} {
+  func.call @"l1"() : () -> ()
+  func.call @"l2"() : () -> ()
+  func.call @"l3"() : () -> ()
+  func.call @"l4"() : () -> ()
+  func.return
+}
+llvm.mlir.global external @"a0"() {alignment = 1 : i64} : !llvm.array<16 x i8>
+llvm.mlir.global external @"a1"() {alignment = 1 : i64} : !llvm.array<4 x i8>
+llvm.mlir.global external @"a2"() {alignment = 1 : i64} : !llvm.array<4 x i8>
+llvm.mlir.global external @"a3"() {alignment = 1 : i64} : !llvm.array<2 x i8>
+llvm.mlir.global external @"a4"() {alignment = 1 : i64} : !llvm.array<2 x i8>
+}
+
+// CHECK-NOT: @pool_helper
+// CHECK: func.func @cpu_helper(
+// CHECK: func.func @l4() attributes {llvm.linkage = #llvm.linkage<external>} {
+// CHECK-LABEL: func.func @knpu_model(
+// CHECK-SAME: %[[IN:.*]]: tensor<1x4x4x1xi8> {knpu.scale = 1.000000e+00 : f32, knpu.zero_point = -128 : i64})
+// CHECK-SAME: -> (tensor<1x1x1x2xi8> {knpu.scale = 3.906250e-03 : f32, knpu.zero_point = -128 : i64})
+// CHECK: %[[P:.*]] = knpu.avgpool %[[IN]] {clamp = array<i64: -128, 127>, kernel = array<i64: 2, 2>, pad = array<i64: 0, 0, 0, 0>, stride = array<i64: 2, 2>} : (tensor<1x4x4x1xi8>) -> tensor<1x2x2x1xi8>
+// CHECK: %[[SHAPE:.*]] = arith.constant dense<[1, 1, 1, 4]> : tensor<4xindex>
+// CHECK: %[[R:.*]] = tensor.reshape %[[P]](%[[SHAPE]]) : (tensor<1x2x2x1xi8>, tensor<4xindex>) -> tensor<1x1x1x4xi8>
+// CHECK: %[[W:.*]] = arith.constant dense<{{\[\[\[\[}}1, 2, 3, 4]]], {{\[\[\[}}-1, -2, -3, -4]]]]> : tensor<2x1x1x4xi8>
+// CHECK: %[[B:.*]] = arith.constant dense<[10, -10]> : tensor<2xi32>
+// CHECK: %[[RQ:.*]] = arith.constant dense<{{\[\[}}1073741824, -2], [1073741824, -3]]> : tensor<2x2xi32>
+// CHECK: %[[F:.*]] = knpu.conv2d %[[R]], %[[W]], %[[B]], %[[RQ]] {clamp = array<i64: -128, 127>, input_zp = -128 : i64, output_zp = 5 : i64, pad = array<i64: 0, 0, 0, 0>, round = "single", stride = array<i64: 1, 1>} : (tensor<1x1x1x4xi8>, tensor<2x1x1x4xi8>, tensor<2xi32>, tensor<2x2xi32>) -> tensor<1x1x1x2xi8>
+// CHECK: %[[C:.*]] = knpu.cpu @l4(%[[F]]) {in_array = @a3, out_array = @a4} : (tensor<1x1x1x2xi8>) -> tensor<1x1x1x2xi8>
+// CHECK: return %[[C]]
+// CHECK-NOT: @a0
+// CHECK: llvm.mlir.global external @a3()
+// CHECK-NEXT: llvm.mlir.global external @a4()
+
+// -----
+
+// An fc layer that reads a 1x2x2 activation as its vector of 4: the input
+// is reshaped to 1x1x1x4.
+
+module {
+llvm.mlir.global internal constant @"W1"("\01\01") {alignment = 1 : i64} : !llvm.array<2 x i8>
+llvm.mlir.global internal constant @"Z2"("\00\00\00\00\00\00\00\00") {alignment = 4 : i64} : !llvm.array<8 x i8>
+llvm.mlir.global internal constant @"M2"("\00\00\00@\00\00\00@") {alignment = 4 : i64} : !llvm.array<8 x i8>
+llvm.mlir.global internal constant @"S2"("\00\00\00\00\FF\FF\FF\FF") {alignment = 4 : i64} : !llvm.array<8 x i8>
+llvm.mlir.global internal constant @"W2"("\01\02\03\04") {alignment = 1 : i64} : !llvm.array<4 x i8>
+llvm.mlir.global internal constant @"Z1"("\00\00\00\00") {alignment = 4 : i64} : !llvm.array<4 x i8>
+llvm.mlir.global internal constant @"M1"("\00\00\00@") {alignment = 4 : i64} : !llvm.array<4 x i8>
+llvm.mlir.global internal constant @"S1"("\00\00\00\00") {alignment = 4 : i64} : !llvm.array<4 x i8>
+llvm.mlir.global internal constant @"SC"(0x3F800000 : f32) {alignment = 4 : i64} : f32
+func.func @"l1"() attributes {llvm.linkage = #llvm.linkage<internal>, knpu.op = "conv2d", knpu.args = {in = @"a0", out = @"a1", w = @"W1", bias = @"Z2", mult = @"M2", shift = @"S2", in_shape = array<i64: 1, 2, 1>, out_shape = array<i64: 1, 2, 2>, kernel = array<i64: 1, 1>, stride = array<i64: 1, 1>, pad = array<i64: 0, 0, 0, 0>, in_zp = 0 : i64, out_zp = 3 : i64, clamp = array<i64: -128, 127>}} {
+  func.return
+}
+func.func @"l2"() attributes {llvm.linkage = #llvm.linkage<internal>, knpu.op = "fc", knpu.args = {in = @"a1", out = @"a2", w = @"W2", bias = @"Z1", mult = @"M1", shift = @"S1", in_size = 4 : i64, out_size = 1 : i64, in_zp = 3 : i64, out_zp = 0 : i64, clamp = array<i64: -128, 127>}} {
+  func.return
+}
+func.func @"knpu_model"() attributes {knpu.op = "model", knpu.args = {in = @"a0", out = @"a2", in_scale = @"SC", in_zp = 0 : i64, out_scale = @"SC", out_zp = 0 : i64, round = "double"}} {
+  func.call @"l1"() : () -> ()
+  func.call @"l2"() : () -> ()
+  func.return
+}
+llvm.mlir.global external @"a0"() {alignment = 1 : i64} : !llvm.array<2 x i8>
+llvm.mlir.global external @"a1"() {alignment = 1 : i64} : !llvm.array<4 x i8>
+llvm.mlir.global external @"a2"() {alignment = 1 : i64} : !llvm.array<1 x i8>
+}
+
+// CHECK-LABEL: func.func @knpu_model(
+// CHECK: %[[A1:.*]] = knpu.conv2d {{.*}} -> tensor<1x1x2x2xi8>
+// CHECK: %[[SHAPE:.*]] = arith.constant dense<[1, 1, 1, 4]> : tensor<4xindex>
+// CHECK: %[[R:.*]] = tensor.reshape %[[A1]](%[[SHAPE]]) : (tensor<1x1x2x2xi8>, tensor<4xindex>) -> tensor<1x1x1x4xi8>
+// CHECK: %[[A2:.*]] = knpu.conv2d %[[R]], {{.*}} : (tensor<1x1x1x4xi8>, tensor<1x1x1x4xi8>, tensor<1xi32>, tensor<1x2xi32>) -> tensor<1x1x1x1xi8>
+// CHECK: return %[[A2]]

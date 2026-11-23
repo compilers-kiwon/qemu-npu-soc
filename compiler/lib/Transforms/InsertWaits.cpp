@@ -81,6 +81,15 @@ Job describe(ConvOp op) {
   return j;
 }
 
+Job describe(PoolOp op) {
+  Job j;
+  ArrayRef<int64_t> in = op.getIfmShape(), out = op.getOfmShape();
+  int64_t ifm = op.getIfm(), ofm = op.getOfm();
+  j.reads = {{ifm, ifm + in[0] * in[1] * in[2]}};
+  j.writes = {{ofm, ofm + out[0] * out[1] * out[2]}};
+  return j;
+}
+
 void drain(std::deque<Job> &queue, int64_t pending) {
   while (static_cast<int64_t>(queue.size()) > pending)
     queue.pop_front();
@@ -112,10 +121,16 @@ public:
         continue;
       }
 
-      bool isDma = isa<DmaOp>(op);
-      if (!isDma && !isa<ConvOp>(op))
+      Job job;
+      if (auto d = dyn_cast<DmaOp>(op))
+        job = describe(d);
+      else if (auto c = dyn_cast<ConvOp>(op))
+        job = describe(c);
+      else if (auto p = dyn_cast<PoolOp>(op))
+        job = describe(p);
+      else
         continue;
-      Job job = isDma ? describe(cast<DmaOp>(op)) : describe(cast<ConvOp>(op));
+      bool isDma = isa<DmaOp>(op);
       std::deque<Job> &own = isDma ? dmaQueue : kernelQueue;
       std::deque<Job> &other = isDma ? kernelQueue : dmaQueue;
       size_t depth = isDma ? KNPU_DMA_DEPTH : KNPU_KERNEL_DEPTH;

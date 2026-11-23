@@ -9,6 +9,7 @@ add_mlir_library(KnpuTransforms
   Tile.cpp
   Schedule.cpp
   InsertWaits.cpp
+  Estimate.cpp
 
   ADDITIONAL_HEADER_DIRS
   ${KNPU_SOURCE_DIR}/include/knpu/Transforms

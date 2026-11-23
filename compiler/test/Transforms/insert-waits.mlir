@@ -108,3 +108,33 @@ module attributes {knpu.sram_size = 65536 : i64} {
 // CHECK-NEXT: knpu.kernel_wait 0
 // CHECK-NEXT: knpu.dma "store"
 // CHECK-NEXT: knpu.stop
+
+// -----
+
+// Average pooling reads its IFM and writes its OFM like a convolution. The
+// second load overwrites the first pooling's input, so it waits for that
+// pooling; the store waits only for the second one (the first is done).
+
+module attributes {knpu.sram_size = 65536 : i64} {
+  func.func @knpu_model() {
+    knpu.dma "load" region 1 [0] sram [0] length 64 count 1 stride 0
+    knpu.pool {ifm = 0 : i64, ifm_shape = array<i64: 4, 4, 4>, ofm = 64 : i64, ofm_shape = array<i64: 2, 2, 4>, kernel = array<i64: 2, 2>, stride = array<i64: 2, 2>, pad = array<i64: 0, 0, 0, 0>, clamp = array<i64: -128, 127>}
+    knpu.dma "load" region 1 [64] sram [0] length 64 count 1 stride 0
+    knpu.pool {ifm = 0 : i64, ifm_shape = array<i64: 4, 4, 4>, ofm = 80 : i64, ofm_shape = array<i64: 2, 2, 4>, kernel = array<i64: 2, 2>, stride = array<i64: 2, 2>, pad = array<i64: 0, 0, 0, 0>, clamp = array<i64: -128, 127>}
+    knpu.dma "store" region 1 [128] sram [64] length 32 count 1 stride 0
+    knpu.stop
+    return
+  }
+}
+
+// CHECK-LABEL: func.func @knpu_model
+// CHECK-NEXT: knpu.dma "load" region 1[0]
+// CHECK-NEXT: knpu.dma_wait 0
+// CHECK-NEXT: knpu.pool {{{.*}}ofm = 64
+// CHECK-NEXT: knpu.kernel_wait 0
+// CHECK-NEXT: knpu.dma "load" region 1[64]
+// CHECK-NEXT: knpu.dma_wait 0
+// CHECK-NEXT: knpu.pool {{{.*}}ofm = 80
+// CHECK-NEXT: knpu.kernel_wait 0
+// CHECK-NEXT: knpu.dma "store"
+// CHECK-NEXT: knpu.stop

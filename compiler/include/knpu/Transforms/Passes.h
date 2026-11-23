@@ -28,16 +28,21 @@ inline int64_t convConstBytes(int64_t oc, int64_t kh, int64_t kw,
   return alignTo16(oc * kh * kw * ic) + alignTo16(4 * oc) + 8 * oc;
 }
 
-/// SRAM bytes a convolution layer needs: its constants followed by one
-/// input and one output buffer, or by two of each when the layer has more
-/// than one tile (double buffering). knpu-tile chooses tiles with this and
-/// knpu-schedule lays out SRAM the same way.
-inline int64_t convSramBytes(int64_t constBytes, int64_t inBytes,
-                             int64_t outBytes, bool doubleBuffered) {
+/// SRAM bytes a layer needs on its own: its constants (none for a pooling
+/// layer) followed by one input and one output buffer, or by two of each
+/// when its tiles are double-buffered. knpu-tile chooses tiles with this;
+/// knpu-schedule lays out a layer's buffers in the same order.
+inline int64_t layerSramBytes(int64_t constBytes, int64_t inBytes,
+                              int64_t outBytes, bool doubleBuffered) {
   int64_t n = doubleBuffered ? 2 : 1;
   return alignTo16(constBytes) + n * alignTo16(inBytes) +
          n * alignTo16(outBytes);
 }
+
+/// Attributes knpu-estimate adds: (start, end) cycle of a DMA or operation
+/// command, and the cycle the whole job ends at on the model function.
+inline constexpr llvm::StringLiteral kCyclesAttr = "knpu.cycles";
+inline constexpr llvm::StringLiteral kTotalCyclesAttr = "knpu.total_cycles";
 
 } // namespace mlir::knpu
 

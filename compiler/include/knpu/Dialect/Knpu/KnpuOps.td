@@ -21,6 +21,9 @@ def Knpu_Conv2DOp : Knpu_Op<"conv2d", [Pure]> {
     `stride` is (SH, SW), `pad` is (top, left, bottom, right), `clamp` is
     (min, max) and `round` is "double" or "single". The shapes satisfy the
     window conditions of docs/npu-spec.md 6.4.
+
+    A fully connected layer is a 1x1 convolution of a 1x1x1xIC input
+    (docs/design.md D7).
   }];
   let arguments = (ins
     TensorRankOf<[I8], [4]>:$input,
@@ -38,6 +41,52 @@ def Knpu_Conv2DOp : Knpu_Op<"conv2d", [Pure]> {
   let assemblyFormat = [{
     $input `,` $weight `,` $bias `,` $rq attr-dict `:`
     functional-type(operands, results)
+  }];
+  let hasVerifier = 1;
+}
+
+def Knpu_AvgPool2DOp : Knpu_Op<"avgpool", [Pure]> {
+  let summary = "int8 average pooling";
+  let description = [{
+    `AveragePool` of TFLite Micro (docs/npu-spec.md 8.4): input 1xHxWxC
+    (NHWC), output 1xOHxOWxC. The input and output have the same
+    quantization, so the operation has no zero point or rounding mode.
+
+    `kernel` is (KH, KW); `stride`, `pad` and `clamp` are as in
+    `knpu.conv2d`. The shapes satisfy the window conditions of
+    docs/npu-spec.md 6.4.
+  }];
+  let arguments = (ins
+    TensorRankOf<[I8], [4]>:$input,
+    DenseI64ArrayAttr:$kernel,
+    DenseI64ArrayAttr:$stride,
+    DenseI64ArrayAttr:$pad,
+    DenseI64ArrayAttr:$clamp
+  );
+  let results = (outs TensorRankOf<[I8], [4]>:$output);
+  let assemblyFormat = [{
+    $input attr-dict `:` functional-type(operands, results)
+  }];
+  let hasVerifier = 1;
+}
+
+def Knpu_CpuOp : Knpu_Op<"cpu"> {
+  let summary = "A layer that runs on the CPU after the NPU job";
+  let description = [{
+    Calls `callee`, the C function of a `#pragma knpu cpu` layer, which
+    reads the global array `in_array` and writes `out_array`
+    (docs/design.md 9.3). knpu-import keeps the function for the CPU code;
+    the compiler knows only its inputs and outputs.
+  }];
+  let arguments = (ins
+    TensorRankOf<[I8], [4]>:$input,
+    FlatSymbolRefAttr:$callee,
+    FlatSymbolRefAttr:$in_array,
+    FlatSymbolRefAttr:$out_array
+  );
+  let results = (outs TensorRankOf<[I8], [4]>:$output);
+  let assemblyFormat = [{
+    $callee `(` $input `)` attr-dict `:` functional-type(operands, results)
   }];
   let hasVerifier = 1;
 }
@@ -91,6 +140,27 @@ def Knpu_ConvOp : Knpu_Op<"conv"> {
     DenseI64ArrayAttr:$pad,
     DenseI64ArrayAttr:$clamp,
     StrAttr:$round
+  );
+  let assemblyFormat = "attr-dict";
+  let hasVerifier = 1;
+}
+
+def Knpu_PoolOp : Knpu_Op<"pool"> {
+  let summary = "OP_AVGPOOL with its SET state";
+  let description = [{
+    `ifm` and `ofm` are SRAM offsets and the shapes (H, W, C); the other
+    attributes are as in `knpu.avgpool`. OP_AVGPOOL does not use the zero
+    points or ROUND_MODE (docs/npu-spec.md 8.4).
+  }];
+  let arguments = (ins
+    I64Attr:$ifm,
+    DenseI64ArrayAttr:$ifm_shape,
+    I64Attr:$ofm,
+    DenseI64ArrayAttr:$ofm_shape,
+    DenseI64ArrayAttr:$kernel,
+    DenseI64ArrayAttr:$stride,
+    DenseI64ArrayAttr:$pad,
+    DenseI64ArrayAttr:$clamp
   );
   let assemblyFormat = "attr-dict";
   let hasVerifier = 1;
@@ -150,6 +220,28 @@ def Knpu_IoOp : Knpu_Op<"io"> {
   let assemblyFormat = [{
     $direction `region` $region `[` $offset `]` `shape` $shape
     `scale` $scale `zero_point` $zero_point attr-dict
+  }];
+  let hasVerifier = 1;
+}
+
+def Knpu_CpuStepOp : Knpu_Op<"cpu_step"> {
+  let summary = "One step the runtime takes after the NPU job";
+  let description = [{
+    The `knpu.cpu_step` operations of a module, in their order, are what
+    the runtime does after the NPU job (docs/design.md 9.5, 10). `kind`
+    "copy_in" copies `size` bytes from the arena at `offset` into the array
+    `symbol` of the CPU code, "call" calls the function `symbol`, and
+    "copy_out" copies `size` bytes of the array `symbol` to the arena at
+    `offset`.
+  }];
+  let arguments = (ins
+    StrAttr:$kind,
+    FlatSymbolRefAttr:$symbol,
+    OptionalAttr<I64Attr>:$offset,
+    OptionalAttr<I64Attr>:$size
+  );
+  let assemblyFormat = [{
+    $kind $symbol (`arena` `[` $offset^ `]` `size` $size)? attr-dict
   }];
   let hasVerifier = 1;
 }

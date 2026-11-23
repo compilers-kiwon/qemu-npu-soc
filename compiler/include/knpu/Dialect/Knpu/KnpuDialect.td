@@ -12,16 +12,17 @@ def Knpu_Dialect : Dialect {
   let description = [{
     The dialect has two levels (docs/design.md 9.4).
 
-    Graph operations (`knpu.conv2d`) take and return tensor values. The
-    `knpu-import` pass builds them from the functions that lcc marked with
-    `knpu.op` / `knpu.args` (`#pragma knpu`, docs/design.md 9.3).
+    Graph operations (`knpu.conv2d`, `knpu.avgpool`, `knpu.cpu`) take and
+    return tensor values. The `knpu-import` pass builds them from the
+    functions that lcc marked with `knpu.op` / `knpu.args` (`#pragma knpu`,
+    docs/design.md 9.3).
 
-    Command operations (`knpu.dma`, `knpu.conv`, `knpu.dma_wait`,
-    `knpu.kernel_wait`, `knpu.stop`) follow the commands of the NPU
-    specification (docs/npu-spec.md) almost one to one; the values of the SET
-    commands are attributes. `knpu.region` and `knpu.io` describe the region
-    table and the model inputs and outputs of `model.knpu`
-    (docs/model-format.md).
+    Command operations (`knpu.dma`, `knpu.conv`, `knpu.pool`,
+    `knpu.dma_wait`, `knpu.kernel_wait`, `knpu.stop`) follow the commands of
+    the NPU specification (docs/npu-spec.md) almost one to one; the values of
+    the SET commands are attributes. `knpu.region`, `knpu.io` and
+    `knpu.cpu_step` describe the region table, the model inputs and outputs
+    and the CPU steps of `model.knpu` (docs/model-format.md).
   }];
   let cppNamespace = "::mlir::knpu";
 }

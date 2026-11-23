@@ -106,6 +106,21 @@ public:
     op(KNPU_OP_CONV);
   }
 
+  /// OP_AVGPOOL uses neither the zero points nor ROUND_MODE
+  void pool(PoolOp p) {
+    ArrayRef<int64_t> in = p.getIfmShape(), out = p.getOfmShape(),
+                      k = p.getKernel(), s = p.getStride(), pd = p.getPad();
+    set(KNPU_SET_IFM_BASE, 0, p.getIfm());
+    set(KNPU_SET_IFM_SHAPE, in[2], (in[0] << 16) | in[1]);
+    set(KNPU_SET_KERNEL, (k[0] << 8) | k[1]);
+    set(KNPU_SET_STRIDE, (s[0] << 8) | s[1]);
+    set(KNPU_SET_PAD, (pd[3] << 12) | (pd[2] << 8) | (pd[1] << 4) | pd[0]);
+    set(KNPU_SET_OFM_BASE, 0, p.getOfm());
+    set(KNPU_SET_OFM_SHAPE, out[2], (out[0] << 16) | out[1]);
+    set(KNPU_SET_CLAMP, clampParam(p.getClamp()[0], p.getClamp()[1]));
+    op(KNPU_OP_AVGPOOL);
+  }
+
   std::vector<uint32_t> words;
 
 private:
@@ -180,6 +195,8 @@ LogicalResult mlir::knpu::writeModelFile(ModuleOp module,
       enc.dma(d);
     else if (auto c = dyn_cast<ConvOp>(op))
       enc.conv(c);
+    else if (auto p = dyn_cast<PoolOp>(op))
+      enc.pool(p);
     else if (auto w = dyn_cast<DmaWaitOp>(op))
       enc.wait(KNPU_OP_DMA_WAIT, w.getPending());
     else if (auto w = dyn_cast<KernelWaitOp>(op))

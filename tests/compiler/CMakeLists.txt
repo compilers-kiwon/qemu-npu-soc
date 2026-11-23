@@ -8,8 +8,9 @@
 #   V3  test_conv_model.py: the tflite2c C on gcc, and lcc -> knpu-compile
 #       -> knpu_run (shared NPU core), both compared with V2
 #   V3  test_mnist_model.py: the MNIST CNN of M2 (so far its V2 outputs and
-#       logits, from TFLite Micro and from the tflite2c C on gcc,
-#       docs/plan.md M2.1 and M2.3)
+#       logits, from TFLite Micro and from the tflite2c C on gcc, and the
+#       NPU part through lcc -> knpu-compile -> knpu_run, docs/plan.md M2.1
+#       to M2.4)
 #   V2  test_softmax.py: the tflite2c softmax on gcc against TFLite Micro,
 #       over input scales, betas and row lengths
 
@@ -87,6 +88,8 @@ set(MNIST_MODEL_TEST
   --schema ${KNPU_TFLITE_SCHEMA}
   --lcc-dir ${KNPU_LCC_DIR}
   --cc ${CMAKE_C_COMPILER}
+  --knpu-compile $<TARGET_FILE:knpu-compile>
+  --knpu-run $<TARGET_FILE:knpu_run>
   --tflm-double $<TARGET_FILE:tflm_run_double>
   --tflm-single $<TARGET_FILE:tflm_run_single>
   --work-dir ${CMAKE_CURRENT_BINARY_DIR}/work-mnist)

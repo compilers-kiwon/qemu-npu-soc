@@ -136,3 +136,62 @@ knpu.region 0 "const" size 8 content dense<[1, 2, 3, 4]> : tensor<4xi8>
 
 // expected-error @+1 {{scale must be positive and finite}}
 knpu.io "input" region 1 [0] shape [1, 8, 8, 1] scale 0.0 zero_point 0
+
+// -----
+
+func.func @avgpool_channels(%in: tensor<1x4x4x2xi8>) {
+  // expected-error @+1 {{output channels must match the input}}
+  %0 = knpu.avgpool %in {kernel = array<i64: 2, 2>, stride = array<i64: 2, 2>,
+      pad = array<i64: 0, 0, 0, 0>, clamp = array<i64: -128, 127>}
+      : (tensor<1x4x4x2xi8>) -> tensor<1x2x2x3xi8>
+  return
+}
+
+// -----
+
+func.func @avgpool_output_shape(%in: tensor<1x5x5x2xi8>) {
+  // expected-error @+1 {{output must be 2x2 for this input, kernel, stride and padding}}
+  %0 = knpu.avgpool %in {kernel = array<i64: 2, 2>, stride = array<i64: 2, 2>,
+      pad = array<i64: 0, 0, 0, 0>, clamp = array<i64: -128, 127>}
+      : (tensor<1x5x5x2xi8>) -> tensor<1x3x3x2xi8>
+  return
+}
+
+// -----
+
+module attributes {knpu.sram_size = 4096 : i64} {
+  func.func @pool_outside_sram() {
+    // expected-error @+1 {{OFM [4090, 4098) is outside the 4096-byte SRAM}}
+    knpu.pool {ifm = 0 : i64, ifm_shape = array<i64: 4, 4, 2>,
+               ofm = 4090 : i64, ofm_shape = array<i64: 2, 2, 2>,
+               kernel = array<i64: 2, 2>, stride = array<i64: 2, 2>,
+               pad = array<i64: 0, 0, 0, 0>, clamp = array<i64: -128, 127>}
+    return
+  }
+}
+
+// -----
+
+func.func @pool_overlap() {
+  // expected-error @+1 {{OFM overlaps the IFM}}
+  knpu.pool {ifm = 0 : i64, ifm_shape = array<i64: 4, 4, 2>, ofm = 16 : i64,
+             ofm_shape = array<i64: 2, 2, 2>, kernel = array<i64: 2, 2>,
+             stride = array<i64: 2, 2>, pad = array<i64: 0, 0, 0, 0>,
+             clamp = array<i64: -128, 127>}
+  return
+}
+
+// -----
+
+// expected-error @+1 {{kind must be "copy_in", "call" or "copy_out"}}
+knpu.cpu_step "jump" @f
+
+// -----
+
+// expected-error @+1 {{a call has no arena offset or size}}
+knpu.cpu_step "call" @f arena [0] size 4
+
+// -----
+
+// expected-error @+1 {{a copy needs an arena offset and a size}}
+knpu.cpu_step "copy_in" @a
