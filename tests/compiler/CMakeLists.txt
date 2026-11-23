@@ -7,6 +7,8 @@
 #       built once per rounding mode, runs the .tflite model itself
 #   V3  test_conv_model.py: the tflite2c C on gcc, and lcc -> knpu-compile
 #       -> knpu_run (shared NPU core), both compared with V2
+#   V3  test_mnist_model.py: the MNIST CNN of M2 (so far its V2 outputs and
+#       logits, docs/plan.md M2.1)
 
 include(${CMAKE_CURRENT_SOURCE_DIR}/tflm-deps.cmake)
 
@@ -73,3 +75,17 @@ add_custom_target(update-conv-vectors
           ${Python3_EXECUTABLE} ${CONV_MODEL_TEST} --update-vectors
   DEPENDS knpu-compile knpu_run tflm_run_double tflm_run_single
   USES_TERMINAL)
+
+set(MNIST_MODEL_TEST
+  ${CMAKE_CURRENT_SOURCE_DIR}/test_mnist_model.py
+  --model ${KNPU_REPO_DIR}/models/mnist/mnist.tflite
+  --digits ${KNPU_REPO_DIR}/models/mnist/digits
+  --schema ${KNPU_TFLITE_SCHEMA}
+  --tflm-double $<TARGET_FILE:tflm_run_double>
+  --tflm-single $<TARGET_FILE:tflm_run_single>
+  --work-dir ${CMAKE_CURRENT_BINARY_DIR}/work-mnist)
+
+add_test(NAME v3_mnist_model
+         COMMAND Python3::Interpreter ${MNIST_MODEL_TEST})
+set_tests_properties(v3_mnist_model PROPERTIES
+                     ENVIRONMENT PYTHONDONTWRITEBYTECODE=1)
