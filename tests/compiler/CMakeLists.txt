@@ -8,7 +8,10 @@
 #   V3  test_conv_model.py: the tflite2c C on gcc, and lcc -> knpu-compile
 #       -> knpu_run (shared NPU core), both compared with V2
 #   V3  test_mnist_model.py: the MNIST CNN of M2 (so far its V2 outputs and
-#       logits, docs/plan.md M2.1)
+#       logits, from TFLite Micro and from the tflite2c C on gcc,
+#       docs/plan.md M2.1 and M2.3)
+#   V2  test_softmax.py: the tflite2c softmax on gcc against TFLite Micro,
+#       over input scales, betas and row lengths
 
 include(${CMAKE_CURRENT_SOURCE_DIR}/tflm-deps.cmake)
 
@@ -80,12 +83,24 @@ set(MNIST_MODEL_TEST
   ${CMAKE_CURRENT_SOURCE_DIR}/test_mnist_model.py
   --model ${KNPU_REPO_DIR}/models/mnist/mnist.tflite
   --digits ${KNPU_REPO_DIR}/models/mnist/digits
+  --tflite2c ${KNPU_TFLITE2C}
   --schema ${KNPU_TFLITE_SCHEMA}
+  --lcc-dir ${KNPU_LCC_DIR}
+  --cc ${CMAKE_C_COMPILER}
   --tflm-double $<TARGET_FILE:tflm_run_double>
   --tflm-single $<TARGET_FILE:tflm_run_single>
   --work-dir ${CMAKE_CURRENT_BINARY_DIR}/work-mnist)
 
 add_test(NAME v3_mnist_model
          COMMAND Python3::Interpreter ${MNIST_MODEL_TEST})
-set_tests_properties(v3_mnist_model PROPERTIES
+add_test(NAME v2_softmax
+         COMMAND Python3::Interpreter
+                 ${CMAKE_CURRENT_SOURCE_DIR}/test_softmax.py
+                 --tflite2c ${KNPU_TFLITE2C}
+                 --schema ${KNPU_TFLITE_SCHEMA}
+                 --cc ${CMAKE_C_COMPILER}
+                 --tflm-double $<TARGET_FILE:tflm_run_double>
+                 --tflm-single $<TARGET_FILE:tflm_run_single>
+                 --work-dir ${CMAKE_CURRENT_BINARY_DIR}/work-softmax)
+set_tests_properties(v3_mnist_model v2_softmax PROPERTIES
                      ENVIRONMENT PYTHONDONTWRITEBYTECODE=1)

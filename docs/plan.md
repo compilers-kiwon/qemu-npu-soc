@@ -241,13 +241,18 @@ V1이 통과한다.
   방식마다 계산한다.
 - `--main` 파일이 logits도 쓴다. `--npu-only`는 CPU 층을 빼고 logits를 모델
   출력으로 하는 C를 쓴다.
+- `tests/compiler/test_softmax.py`: MNIST의 logits는 softmax의 경로를 일부만
+  지나므로, softmax 하나만 있는 모델을 TFLite Python 스키마의 객체 API로
+  만들어 입력 스케일, beta, 행 길이를 바꿔 가며 TFLite Micro와 생성기 C를
+  비교한다.
 
 완료 조건:
 
 - 생성기가 쓴 MNIST C를 `gcc -std=c89 -pedantic-errors`로 빌드해 시험 입력
-  열다섯을 돌린 최종 출력과 logits가 두 반올림 방식 모두 V2와 같다. softmax
-  이식의 비트 일치가 여기서 확인된다.
-- 같은 C를 gcc의 UBSan(`-fsanitize=undefined`)으로 돌려도 보고가 없다.
+  열다섯을 돌린 최종 출력과 logits가 두 반올림 방식 모두 V2와 같다.
+- softmax 시험의 모든 경우에서 생성기 C의 출력이 두 반올림 방식 모두 TFLite
+  Micro와 같다. softmax 이식의 비트 일치는 여기서 확인된다.
+- 같은 C들을 gcc의 UBSan(`-fsanitize=undefined`)으로 돌려도 보고가 없다.
 - lcc가 MNIST C를 경고 없이 받는다(`-A -Wf-pragma=knpu`).
 - 합성곱 모델의 결과는 그대로다.
 
