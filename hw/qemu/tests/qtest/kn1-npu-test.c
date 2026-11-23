@@ -413,6 +413,93 @@ static void test_all_commands(void)
     qtest_quit(qts);
 }
 
+/*
+ * A 3x3 average pooling, stride 2, padding 1, from 5x5x2 to 3x3x2: the
+ * windows at the edges hold four or six input elements, several averages
+ * end in .5 and the clamp cuts both ends. The zero points and the rounding
+ * mode are set but OP_AVGPOOL does not use them. Region 1: input at 0x00
+ * (50 bytes), output at 0x40 (18 bytes). SRAM: input 0x000, output 0x100.
+ */
+static void test_avgpool_job(void)
+{
+    QTestState *qts = start_machine("");
+    Prog p = { .n = 0 };
+    const int lo = -100, hi = 60;
+    int8_t in[5][5][2];
+    uint8_t out[3][3][2];
+    int y, x, c, oy, ox, ky, kx;
+
+    for (y = 0; y < 5; y++) {
+        for (x = 0; x < 5; x++) {
+            for (c = 0; c < 2; c++) {
+                in[y][x][c] = (int8_t)((y * 37 + x * 11 + c * 101) % 255 -
+                                       127);
+            }
+        }
+    }
+    qtest_memwrite(qts, REGION1_ADDR, in, sizeof(in));
+    qtest_memset(qts, REGION1_ADDR + 0x40, 0x5a, sizeof(out));
+
+    set(&p, KNPU_SET_DMA_SRC, SPACE_REGION(1), 0);
+    set(&p, KNPU_SET_DMA_DST, SPACE_SRAM, 0);
+    set(&p, KNPU_SET_DMA_LEN, 0, sizeof(in));
+    op(&p, KNPU_OP_DMA, 0);
+    set(&p, KNPU_SET_IFM_BASE, 0, 0);
+    set(&p, KNPU_SET_IFM_SHAPE, 2, 5 << 16 | 5);
+    op(&p, KNPU_SET_IFM_ZP, 9);
+    op(&p, KNPU_SET_KERNEL, 3 << 8 | 3);
+    op(&p, KNPU_SET_STRIDE, 2 << 8 | 2);
+    op(&p, KNPU_SET_PAD, 0x1111);
+    set(&p, KNPU_SET_OFM_BASE, 0, 0x100);
+    set(&p, KNPU_SET_OFM_SHAPE, 2, 3 << 16 | 3);
+    op(&p, KNPU_SET_OFM_ZP, (uint16_t)-7);
+    op(&p, KNPU_SET_CLAMP, (uint8_t)hi << 8 | (uint8_t)lo);
+    op(&p, KNPU_SET_ROUND_MODE, KNPU_ROUND_SINGLE);
+    op(&p, KNPU_OP_DMA_WAIT, 0);
+    op(&p, KNPU_OP_AVGPOOL, 0);
+    set(&p, KNPU_SET_DMA_SRC, SPACE_SRAM, 0x100);
+    set(&p, KNPU_SET_DMA_DST, SPACE_REGION(1), 0x40);
+    set(&p, KNPU_SET_DMA_LEN, 0, sizeof(out));
+    op(&p, KNPU_OP_KERNEL_WAIT, 0);
+    op(&p, KNPU_OP_DMA, 0);
+    op(&p, KNPU_OP_STOP, 0);
+
+    set_regions(qts);
+    wr(qts, R_PERF_CTRL, PERF_ENABLE);
+    g_assert_cmphex(run(qts, &p), ==, STATUS_DONE);
+
+    qtest_memread(qts, REGION1_ADDR + 0x40, out, sizeof(out));
+    for (oy = 0; oy < 3; oy++) {
+        for (ox = 0; ox < 3; ox++) {
+            for (c = 0; c < 2; c++) {
+                int sum = 0, n = 0, avg;
+
+                for (ky = 0; ky < 3; ky++) {
+                    for (kx = 0; kx < 3; kx++) {
+                        y = oy * 2 - 1 + ky;
+                        x = ox * 2 - 1 + kx;
+                        if (y >= 0 && y < 5 && x >= 0 && x < 5) {
+                            sum += in[y][x][c];
+                            n++;
+                        }
+                    }
+                }
+                /* Half away from zero (docs/npu-spec.md 8.4) */
+                avg = sum > 0 ? (sum + n / 2) / n : (sum - n / 2) / n;
+                g_assert_cmpint((int8_t)out[oy][ox][c], ==,
+                                MIN(MAX(avg, lo), hi));
+            }
+        }
+    }
+
+    /* One operation without MACs between the two DMAs */
+    g_assert_cmpuint(rd64(qts, R_PERF_OPS), ==, 3);
+    g_assert_cmpuint(rd64(qts, R_PERF_MACS), ==, 0);
+    g_assert_cmpuint(rd64(qts, R_PERF_DMA_RD), ==, sizeof(in));
+    g_assert_cmpuint(rd64(qts, R_PERF_DMA_WR), ==, sizeof(out));
+    qtest_quit(qts);
+}
+
 static void test_interrupts(void)
 {
     QTestState *qts = start_machine("");
@@ -677,6 +764,7 @@ int main(int argc, char **argv)
     qtest_add_func("kn1-npu/access-rules", test_access_rules);
     qtest_add_func("kn1-npu/conv-job", test_conv_job);
     qtest_add_func("kn1-npu/all-commands", test_all_commands);
+    qtest_add_func("kn1-npu/avgpool-job", test_avgpool_job);
     qtest_add_func("kn1-npu/interrupts", test_interrupts);
     qtest_add_func("kn1-npu/errors", test_errors);
     qtest_add_func("kn1-npu/perf-counters", test_perf_counters);

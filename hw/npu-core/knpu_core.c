@@ -238,6 +238,28 @@ static bool window_shape_ok(const KnpuState *st)
            st->ofm.w == (pw - st->kw) / st->sw + 1;
 }
 
+/*
+ * SRAM range and overlap checks of an operation (spec 6.4 steps 2 and 3).
+ * The OFM write is the last range of @acc and must not overlap the reads.
+ */
+static int check_ranges(const KnpuCtx *c, const KnpuAccess *acc)
+{
+    const KnpuRange *o = &acc->r[acc->n - 1];
+
+    for (int i = 0; i < acc->n; i++) {
+        if (!in_sram(c, &acc->r[i])) {
+            return KNPU_ERR_SRAM_RANGE;
+        }
+    }
+    for (int i = 0; i < acc->n - 1; i++) {
+        const KnpuRange *r = &acc->r[i];
+        if (o->start < r->end && r->start < o->end) {
+            return KNPU_ERR_BAD_PARAM;
+        }
+    }
+    return KNPU_ERR_NONE;
+}
+
 static int exec_conv(KnpuCtx *c)
 {
     const KnpuState *st = &c->st;
@@ -256,16 +278,9 @@ static int exec_conv(KnpuCtx *c)
     add_range(&acc, st->rq_table, 8 * (uint64_t)out->c, false);
     add_range(&acc, st->ofm_base, (uint64_t)out->h * out->w * out->c, true);
 
-    for (int i = 0; i < acc.n; i++) {
-        if (!in_sram(c, &acc.r[i])) {
-            return KNPU_ERR_SRAM_RANGE;
-        }
-    }
-    for (int i = 0; i < acc.n - 1; i++) {
-        const KnpuRange *o = &acc.r[acc.n - 1], *r = &acc.r[i];
-        if (o->start < r->end && r->start < o->end) {
-            return KNPU_ERR_BAD_PARAM;
-        }
+    int err = check_ranges(c, &acc);
+    if (err != KNPU_ERR_NONE) {
+        return err;
     }
 
     const uint8_t *rq = c->sram + st->rq_table;
@@ -329,6 +344,65 @@ static int exec_conv(KnpuCtx *c)
     return KNPU_ERR_NONE;
 }
 
+static int exec_avgpool(KnpuCtx *c)
+{
+    const KnpuState *st = &c->st;
+    const KnpuShape *in = &st->ifm, *out = &st->ofm;
+    KnpuAccess acc = { .n = 0 };
+
+    if (!window_shape_ok(st) || out->c != in->c) {
+        return KNPU_ERR_BAD_PARAM;
+    }
+
+    add_range(&acc, st->ifm_base, (uint64_t)in->h * in->w * in->c, false);
+    add_range(&acc, st->ofm_base, (uint64_t)out->h * out->w * out->c, true);
+
+    int err = check_ranges(c, &acc);
+    if (err != KNPU_ERR_NONE) {
+        return err;
+    }
+    if (!issue(&c->kernel_q, &c->dma_q, &acc)) {
+        return KNPU_ERR_SYNC;
+    }
+
+    /*
+     * Spec 8.4, the same loop as TFLite Micro AveragePool (int8). The zero
+     * points, the scales and ROUND_MODE are not used. Every window holds
+     * at least one input element (spec 6.4), so n >= 1.
+     */
+    const int8_t *ifm = (const int8_t *)(c->sram + st->ifm_base);
+    int8_t *ofm = (int8_t *)(c->sram + st->ofm_base);
+
+    for (uint32_t oy = 0; oy < out->h; oy++) {
+        for (uint32_t ox = 0; ox < out->w; ox++) {
+            for (uint32_t ch = 0; ch < out->c; ch++) {
+                int32_t sum = 0, n = 0;
+                for (uint32_t ky = 0; ky < st->kh; ky++) {
+                    int64_t iy = (int64_t)oy * st->sh - st->pad_top + ky;
+                    if (iy < 0 || iy >= in->h) {
+                        continue;
+                    }
+                    for (uint32_t kx = 0; kx < st->kw; kx++) {
+                        int64_t ix = (int64_t)ox * st->sw - st->pad_left + kx;
+                        if (ix < 0 || ix >= in->w) {
+                            continue;
+                        }
+                        sum += ifm[((uint64_t)iy * in->w + ix) * in->c + ch];
+                        n++;
+                    }
+                }
+                /* Rounds half away from zero */
+                int32_t avg = sum > 0 ? (sum + n / 2) / n : (sum - n / 2) / n;
+                ofm[((uint64_t)oy * out->w + ox) * out->c + ch] =
+                    (int8_t)clamp32(avg, st->clamp_min, st->clamp_max);
+            }
+        }
+    }
+
+    c->perf.ops++;
+    return KNPU_ERR_NONE;
+}
+
 static bool zp_ok(uint16_t param)
 {
     int16_t v = (int16_t)param;
@@ -355,6 +429,7 @@ static int exec_cmd(KnpuCtx *c, uint16_t cmd, uint16_t param,
     case KNPU_OP_STOP:
     case KNPU_OP_NOP:
     case KNPU_OP_CONV:
+    case KNPU_OP_AVGPOOL:
     case KNPU_OP_DMA:
         if (param) {
             return KNPU_ERR_BAD_PARAM;
@@ -391,6 +466,8 @@ static int exec_cmd(KnpuCtx *c, uint16_t cmd, uint16_t param,
         return KNPU_ERR_NONE;
     case KNPU_OP_CONV:
         return exec_conv(c);
+    case KNPU_OP_AVGPOOL:
+        return exec_avgpool(c);
     case KNPU_OP_DMA:
         return exec_dma(c);
     case KNPU_OP_DMA_WAIT:
@@ -502,8 +579,8 @@ static int exec_cmd(KnpuCtx *c, uint16_t cmd, uint16_t param,
 
     default:
         /*
-         * Unknown commands, and for now also OP_ADD, OP_AVGPOOL and the
-         * SET commands only they use (IFM2_BASE, IFM2_ZP, *_SCALE).
+         * Unknown commands, and for now also OP_ADD and the SET commands
+         * only it uses (IFM2_BASE, IFM2_ZP, *_SCALE).
          */
         return KNPU_ERR_UNKNOWN_CMD;
     }
@@ -512,7 +589,8 @@ static int exec_cmd(KnpuCtx *c, uint16_t cmd, uint16_t param,
 static bool cmd_known(uint16_t cmd)
 {
     switch (cmd) {
-    case KNPU_OP_STOP: case KNPU_OP_NOP: case KNPU_OP_CONV: case KNPU_OP_DMA:
+    case KNPU_OP_STOP: case KNPU_OP_NOP: case KNPU_OP_CONV:
+    case KNPU_OP_AVGPOOL: case KNPU_OP_DMA:
     case KNPU_OP_DMA_WAIT: case KNPU_OP_KERNEL_WAIT:
     case KNPU_SET_IFM_ZP: case KNPU_SET_OFM_ZP: case KNPU_SET_KERNEL:
     case KNPU_SET_STRIDE: case KNPU_SET_PAD: case KNPU_SET_CLAMP:

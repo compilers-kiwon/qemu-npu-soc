@@ -1,11 +1,16 @@
-// V2: golden output of one int8 convolution from the TensorFlow Lite Micro
-// reference kernel (reference_integer_ops::ConvPerChannel). The rounding
+// V2: golden output of one int8 operation from the TensorFlow Lite Micro
+// reference kernels, a convolution (reference_integer_ops::ConvPerChannel)
+// or an average pooling (reference_integer_ops::AveragePool). The rounding
 // mode is fixed at build time by TFLITE_SINGLE_ROUNDING, so CMake builds
 // this file twice: tflm_golden_double and tflm_golden_single.
 //
-//   tflm_golden --ifm H,W,C --ofm H,W,C --kernel KH,KW --stride SH,SW
-//               --pad TOP,LEFT --ifm-zp Z --ofm-zp Z --clamp MIN,MAX
-//               --input F --weights F --bias F --rq F --output F
+//   tflm_golden [--op conv] --ifm H,W,C --ofm H,W,C --kernel KH,KW
+//               --stride SH,SW --pad TOP,LEFT --ifm-zp Z --ofm-zp Z
+//               --clamp MIN,MAX --input F --weights F --bias F --rq F
+//               --output F
+//   tflm_golden --op avgpool --ifm H,W,C --ofm H,W,C --kernel KH,KW
+//               --stride SH,SW --pad TOP,LEFT --clamp MIN,MAX --input F
+//               --output F
 //
 // The binary files use the SRAM layouts of docs/npu-spec.md 7: NHWC int8
 // input, OHWI int8 weights, int32 bias and (multiplier, shift) int32 pairs,
@@ -19,11 +24,13 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <initializer_list>
 #include <map>
 #include <string>
 #include <vector>
 
 #include "tensorflow/lite/micro/kernels/internal/reference/integer_ops/conv.h"
+#include "tensorflow/lite/micro/kernels/internal/reference/integer_ops/pooling.h"
 
 // TFLite Micro leaves MicroPrintf to the platform.
 void MicroPrintf(const char* format, ...) {
@@ -86,18 +93,31 @@ tflite::RuntimeShape Shape(std::vector<int32_t> dims) {
   return tflite::RuntimeShape(static_cast<int>(dims.size()), dims.data());
 }
 
+void Require(std::map<std::string, std::string>& opt,
+             std::initializer_list<const char*> keys) {
+  for (const char* key : keys) {
+    if (!opt.count(key)) Die(std::string("missing ") + key);
+  }
+}
+
+void Save(const std::string& path, const std::vector<int8_t>& data) {
+  FILE* f = std::fopen(path.c_str(), "wb");
+  if (!f || std::fwrite(data.data(), 1, data.size(), f) != data.size() ||
+      std::fclose(f) != 0) {
+    Die("cannot write " + path);
+  }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
   std::map<std::string, std::string> opt;
   for (int i = 1; i + 1 < argc; i += 2) opt[argv[i]] = argv[i + 1];
   if (argc % 2 != 1) Die("options come in pairs");
-  for (const char* key :
-       {"--ifm", "--ofm", "--kernel", "--stride", "--pad", "--ifm-zp",
-        "--ofm-zp", "--clamp", "--input", "--weights", "--bias", "--rq",
-        "--output"}) {
-    if (!opt.count(key)) Die(std::string("missing ") + key);
-  }
+  const std::string op = opt.count("--op") ? opt["--op"] : "conv";
+  if (op != "conv" && op != "avgpool") Die("unknown --op " + op);
+  Require(opt, {"--ifm", "--ofm", "--kernel", "--stride", "--pad", "--clamp",
+                "--input", "--output"});
 
   const std::vector<int> ifm = Ints(opt["--ifm"], 3);
   const std::vector<int> ofm = Ints(opt["--ofm"], 3);
@@ -105,12 +125,36 @@ int main(int argc, char** argv) {
   const std::vector<int> stride = Ints(opt["--stride"], 2);
   const std::vector<int> pad = Ints(opt["--pad"], 2);
   const std::vector<int> clamp = Ints(opt["--clamp"], 2);
-  const int ifm_zp = Ints(opt["--ifm-zp"], 1)[0];
-  const int ofm_zp = Ints(opt["--ofm-zp"], 1)[0];
   const int ic = ifm[2], oc = ofm[2];
 
   std::vector<uint8_t> input =
       Load(opt["--input"], static_cast<size_t>(ifm[0]) * ifm[1] * ic);
+  std::vector<int8_t> output(static_cast<size_t>(ofm[0]) * ofm[1] * oc);
+
+  if (op == "avgpool") {
+    // Parameters as TFLite Micro's pooling kernel fills them (pooling.h)
+    tflite::PoolParams params = {};
+    params.stride_height = stride[0];
+    params.stride_width = stride[1];
+    params.filter_height = kernel[0];
+    params.filter_width = kernel[1];
+    params.padding_values.height = static_cast<int16_t>(pad[0]);
+    params.padding_values.width = static_cast<int16_t>(pad[1]);
+    params.quantized_activation_min = clamp[0];
+    params.quantized_activation_max = clamp[1];
+    if (!tflite::micro::reference_integer_ops::AveragePool(
+            params, Shape({1, ifm[0], ifm[1], ic}),
+            reinterpret_cast<const int8_t*>(input.data()),
+            Shape({1, ofm[0], ofm[1], oc}), output.data())) {
+      Die("a pooling window holds no input element");
+    }
+    Save(opt["--output"], output);
+    return 0;
+  }
+
+  Require(opt, {"--ifm-zp", "--ofm-zp", "--weights", "--bias", "--rq"});
+  const int ifm_zp = Ints(opt["--ifm-zp"], 1)[0];
+  const int ofm_zp = Ints(opt["--ofm-zp"], 1)[0];
   std::vector<uint8_t> weights = Load(
       opt["--weights"], static_cast<size_t>(oc) * kernel[0] * kernel[1] * ic);
   std::vector<uint8_t> bias_raw = Load(opt["--bias"], 4 * oc);
@@ -137,7 +181,6 @@ int main(int argc, char** argv) {
   params.quantized_activation_min = clamp[0];
   params.quantized_activation_max = clamp[1];
 
-  std::vector<int8_t> output(static_cast<size_t>(ofm[0]) * ofm[1] * oc);
   tflite::micro::reference_integer_ops::ConvPerChannel(
       params, multiplier.data(), shift.data(),
       Shape({1, ifm[0], ifm[1], ic}),
@@ -146,11 +189,6 @@ int main(int argc, char** argv) {
       reinterpret_cast<const int8_t*>(weights.data()),
       Shape({oc}), bias.data(),
       Shape({1, ofm[0], ofm[1], oc}), output.data());
-
-  FILE* f = std::fopen(opt["--output"].c_str(), "wb");
-  if (!f || std::fwrite(output.data(), 1, output.size(), f) != output.size() ||
-      std::fclose(f) != 0) {
-    Die("cannot write " + opt["--output"]);
-  }
+  Save(opt["--output"], output);
   return 0;
 }

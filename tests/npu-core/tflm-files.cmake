@@ -3,7 +3,8 @@
 
 # TensorFlow Lite Micro files that the V2 reference build needs, pinned to
 # one commit and checked by SHA-256 (docs/design.md 14). The list is the
-# include closure of the int8 reference convolution and common.cc.
+# include closure of the int8 reference convolution and average pooling and
+# of common.cc.
 
 set(TFLM_COMMIT fd2a85dfb3bedac81920e8667565b1044c6b6a43)
 set(TFLM_URL https://raw.githubusercontent.com/tensorflow/tflite-micro)
@@ -27,4 +28,6 @@ set(TFLM_FILES
   aa30efcc27f0933f2005e211cc098bd63f821ae65e8f228abfd3361804e1110f
   tensorflow/lite/micro/kernels/internal/reference/integer_ops/conv.h
   94fd76303db2a5a22a77a7056a205b8ff02496d5efe996439c4f556c4843719a
+  tensorflow/lite/micro/kernels/internal/reference/integer_ops/pooling.h
+  c7fe4656d2991d8912ec1b2754b034c63f68c45fed79b00e44a761ac8d88e3af
 )

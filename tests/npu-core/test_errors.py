@@ -68,8 +68,6 @@ CASES = [
      {}),
     ("OP_ADD not implemented yet", ["OP_ADD", "OP_STOP"], UNKNOWN_CMD, 0,
      {}),
-    ("OP_AVGPOOL not implemented yet", ["OP_AVGPOOL", "OP_STOP"],
-     UNKNOWN_CMD, 0, {}),
     ("SET_OFM_SCALE not implemented yet", ["SET_OFM_SCALE 1, 0", "OP_STOP"],
      UNKNOWN_CMD, 0, {}),
     ("payload outside QSIZE", ["OP_NOP", ".word 0x4000"], TRUNCATED, 1, {}),
