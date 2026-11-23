@@ -8,9 +8,6 @@ on:
   pull_request:
   workflow_dispatch:
 
-env:
-  BR_MAKE: make -C buildroot O=${{ github.workspace }}/output BR2_EXTERNAL=${{ github.workspace }}/br2-external
-
 jobs:
   buildroot-config:
     runs-on: ubuntu-24.04
@@ -23,11 +20,11 @@ jobs:
         run: sudo apt-get install -y python3-magic python3-flake8 shellcheck
 
       - name: Load kn1_evb_defconfig
-        run: $BR_MAKE kn1_evb_defconfig
+        run: make defconfig
 
       - name: Check that the defconfig is minimal
         run: |
-          $BR_MAKE savedefconfig
+          make br-savedefconfig
           git diff --exit-code -- br2-external/configs/
 
       - name: Run check-package on the br2-external tree
@@ -48,14 +45,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Configure (downloads the pinned TFLite Micro files)
-        run: cmake -S tests/npu-core -B build/npu-core
-
-      - name: Build
-        run: cmake --build build/npu-core --parallel
-
+      # Downloads the pinned TFLite Micro files, builds and runs ctest
       - name: Run V2 and V3
-        run: ctest --test-dir build/npu-core --output-on-failure
+        run: make check-npu-core
 
   # V2 to V4 for the model compiler (M1.7): lit tests of the knpu dialect,
   # passes and model file writer, and the test model compiled from its
@@ -76,22 +68,10 @@ jobs:
           sudo apt-get install -y libmlir-23-dev mlir-23-tools llvm-23-dev \
             llvm-23-tools ninja-build
 
-      - name: Install the generator's Python package
-        run: |
-          python3 -m venv "$HOME/py-venv"
-          "$HOME/py-venv/bin/pip" install --quiet flatbuffers==25.9.23
-
-      - name: Configure (downloads lcc, TFLite Micro and FlatBuffers)
-        run: >
-          cmake -S compiler -B build/compiler -G Ninja
-          -DMLIR_DIR=/usr/lib/llvm-23/lib/cmake/mlir
-          -DPython3_EXECUTABLE=$HOME/py-venv/bin/python3
-
-      - name: Build
-        run: cmake --build build/compiler
-
+      # Makes the generator's venv (PyPI flatbuffers), downloads lcc,
+      # TFLite Micro and FlatBuffers, builds and runs ctest
       - name: Run V4 (lit) and V2, V3 (end to end)
-        run: ctest --test-dir build/compiler --output-on-failure
+        run: make check-compiler
 
   # Host tests of the runtime (docs/design.md 10): model.knpu parsing and
   # checks on the committed test models, the hand-written UAPI against
@@ -108,8 +88,7 @@ jobs:
           rustup default 1.97.1
 
       - name: Run the host tests
-        working-directory: runtime
-        run: cargo test --locked --offline
+        run: make check-runtime
 
   # Schema checks of the kn1-npu binding and the kn1-evb device tree against
   # the pinned Linux release (M1.6)

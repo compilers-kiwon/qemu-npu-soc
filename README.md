@@ -60,17 +60,19 @@ sudo apt-get install build-essential bc bzip2 cpio file git patch perl rsync unz
 ```
 
 `buildroot/utils/check-package`를 돌리려면 `python3-magic`과 `python3-flake8`도 필요하다.
+컴파일러 시험(`make check-compiler`)은 venv를 만들므로 `python3-venv`도 필요하다.
 
 ## 빌드
 
 ```bash
 git clone --recurse-submodules https://github.com/compilers-kiwon/qemu-npu-soc.git
 cd qemu-npu-soc
-make -C buildroot O="$PWD/output" BR2_EXTERNAL="$PWD/br2-external" kn1_evb_defconfig
-make -C buildroot O="$PWD/output" BR2_EXTERNAL="$PWD/br2-external"
+make
 ```
 
-두 번째 `make`가 툴체인, TF-A 2.15.0(`plat/kiwon/kn1`), U-Boot 2026.10,
+저장소 맨 위의 `Makefile`이 빌드와 시험의 진입점이다. `make help`가 대상
+목록을 보여 준다. `make`는 처음에 `kn1_evb_defconfig`을 읽어 `output/`을
+만들고, Buildroot로 툴체인, TF-A 2.15.0(`plat/kiwon/kn1`), U-Boot 2026.10,
 Linux 7.3.1(arm64 `defconfig`에 `CONFIG_DRM_ACCEL`), NPU 드라이버 모듈
 `knpu`와 V5 시험 프로그램, Rust 런타임 `knpu-infer`와 시험 모델, 루트 파일
 시스템, 디바이스 트리, 그리고 kn1-evb 머신을 넣은 QEMU 11.1.3을 모두
@@ -82,7 +84,7 @@ Linux 7.3.1(arm64 `defconfig`에 `CONFIG_DRM_ACCEL`), NPU 드라이버 모듈
 `output/host/bin/qemu-system-aarch64`다.
 
 ```bash
-output/images/start-qemu.sh
+make run
 ```
 
 리셋 벡터의 BL1이 플래시의 FIP에서 BL2와 BL31을 올리고, BL31이 PSCI를 맡은
@@ -100,16 +102,20 @@ CPU 4개, DRAM 4 GiB, RTC, 워치독, `reboot`, `poweroff`, 4 GiB가 아닌 `-m`
 거부를 확인한다. 콘솔 로그는 `output/test-logs/`에 남는다.
 
 ```bash
-python3 tests/boot/kn1_boot_test.py
+make test-boot
 ```
 
+`make test`는 부팅 시험, V1, V5, V6을 차례로 돌린다.
+
 TF-A 포트(`firmware/tf-a/`)나 U-Boot 보드 포트(`firmware/u-boot/`)를 고친
-뒤에는 Buildroot가 소스 트리를 다시 풀어 복사하도록 `make …
-arm-trusted-firmware-dirclean`이나 `make … uboot-dirclean`을 먼저 돌린다.
+뒤에는 Buildroot가 소스 트리를 다시 풀어 복사하도록
+`make br-arm-trusted-firmware-dirclean`이나 `make br-uboot-dirclean`을 먼저
+돌린다. 이처럼 Buildroot의 대상은 `make br-<대상>`으로 부른다(예:
+`make br-linux-rebuild`, `make br-menuconfig`).
 U-Boot는 FIP 안에 들어가므로, U-Boot를 고쳤을 때도 TF-A를 다시 빌드한다.
 
-WSL에서는 Windows 경로가 섞인 `PATH`를 Buildroot가 거부하므로, `make` 앞에
-`PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`을 붙인다.
+WSL은 `PATH`에 공백이 든 Windows 경로를 붙이는데, Buildroot는 그런 `PATH`를
+거부한다. `Makefile`은 Buildroot를 부를 때 그 항목들을 뺀다.
 
 NPU 바인딩과 디바이스 트리는 리눅스 스키마로 검사한다. 호스트에
 dt-schema(pip `dtschema`), yamllint, flex, bison이 있으면, 다음 스크립트가
@@ -125,16 +131,14 @@ tests/dt/check-dt.sh buildroot/dl/linux/linux-7.3.1.tar.xz
 
 `hw/npu-core/`는 [NPU 명세](docs/npu-spec.md)대로 명령열을 실행하는 공유
 코어이고, 나중에 QEMU 장치와 호스트 도구가 함께 쓴다. 지금은 합성곱(`OP_CONV`),
-DMA, 대기 명령과 그에 필요한 SET 명령을 구현했다. `OP_ADD`와 `OP_AVGPOOL`은
-아직 `UNKNOWN_CMD`로 멈춘다.
+평균 풀링(`OP_AVGPOOL`), DMA, 대기 명령과 그에 필요한 SET 명령을 구현했다.
+`OP_ADD`는 아직 `UNKNOWN_CMD`로 멈춘다.
 
 호스트 시험에는 CMake, C/C++ 컴파일러, Python 3가 필요하다. 구성 단계에서
 고정한 커밋의 TensorFlow Lite Micro 파일 9개를 내려받아 SHA-256을 검사한다.
 
 ```bash
-cmake -S tests/npu-core -B build/npu-core
-cmake --build build/npu-core
-ctest --test-dir build/npu-core --output-on-failure
+make check-npu-core
 ```
 
 - V2: TFLite Micro 참조 합성곱을 이중·단일 반올림으로 한 번씩 빌드해
@@ -156,7 +160,7 @@ V1은 전체 빌드가 남긴 QEMU 빌드 트리에서 돈다. kn1-npu qtest(레
 `device-introspect-test`, `qom-test`를 돌린다.
 
 ```bash
-tests/qemu/run-v1.sh
+make test-v1
 ```
 
 ## knpu 드라이버 시험
@@ -175,7 +179,7 @@ V5는 펌웨어 체인으로 부팅한 게스트에서 돈다. `knpu` 모듈을 
 runtime PM을 확인한다.
 
 ```bash
-python3 tests/driver/kn1_v5_test.py
+make test-v5
 ```
 
 ## 모델 컴파일러
@@ -187,20 +191,19 @@ C를 MLIR로 내리면, `knpu-compile`이 MLIR 패스(가져오기, 타일링, �
 지금은 합성곱 층만 다룬다.
 
 apt.llvm.org의 LLVM 23 패키지(`libmlir-23-dev`, `mlir-23-tools`,
-`llvm-23-dev`, `llvm-23-tools`), CMake, Ninja, Python 3과 PyPI
-`flatbuffers` 25.9.23이 필요하다. 구성 단계에서 lcc 릴리스 압축(x86_64에서
+`llvm-23-dev`, `llvm-23-tools`), CMake, Ninja, Python 3과 `python3-venv`가
+필요하다. `make check-compiler`가 `build/py-venv`에 venv를 만들어 PyPI
+`flatbuffers` 25.9.23을 받고, 구성 단계에서 lcc 릴리스 압축(x86_64에서
 도는 aarch64용 mlir 드라이버), TensorFlow Lite Micro와 FlatBuffers 소스,
 TFLite Python 스키마를 내려받아 SHA-256을 검사한다. lcc는 라이선스 때문에
 저장소에 넣지 않는다(설계 12.4절).
 
 ```bash
-python3 -m venv ~/py-venv && ~/py-venv/bin/pip install flatbuffers==25.9.23
-cmake -S compiler -B build/compiler -G Ninja \
-      -DMLIR_DIR=/usr/lib/llvm-23/lib/cmake/mlir \
-      -DPython3_EXECUTABLE=$HOME/py-venv/bin/python3
-cmake --build build/compiler
-ctest --test-dir build/compiler --output-on-failure
+make check-compiler
 ```
+
+`make compiler`는 시험 없이 빌드만 한다. MLIR이 다른 곳에 있으면
+`MLIR_DIR=`로 준다.
 
 - V4: `compiler/test/`의 lit 시험. 방언 검증기, 패스마다의 결과와 오류,
   명세 12절 예시와 워드 단위로 같은 명령열, 실제 lcc 출력 하나를 다룬다.
@@ -216,7 +219,7 @@ ctest --test-dir build/compiler --output-on-failure
 
 ```bash
 L=build/compiler/deps/lcc-v4.2-llvm.3-mlir-aarch64-linux
-~/py-venv/bin/python3 compiler/tflite2c/tflite2c.py \
+build/py-venv/bin/python3 compiler/tflite2c/tflite2c.py \
     --schema build/compiler/deps/schema_py_generated.py --round double \
     models/conv/conv.tflite -o conv.c
 LCCDIR=$L $L/lcc -Wf-pragma=knpu -S conv.c -o conv.mlir
@@ -250,10 +253,11 @@ match=yes
 ```
 
 호스트 시험(모델 파싱과 검사, UAPI 정의와 C 헤더 대조, 명령줄)은 Rust
-1.97.1로 돈다.
+1.97.1로 돈다. 전체 빌드를 했으면 Buildroot가 만든 cargo(`output/host/bin`)를
+쓰고, 아니면 시스템의 cargo를 쓴다.
 
 ```bash
-cd runtime && cargo test --locked
+make check-runtime
 ```
 
 V6은 펌웨어 체인으로 부팅한 게스트에서 모델 넷(반올림 double·single × SRAM
@@ -261,14 +265,14 @@ V6은 펌웨어 체인으로 부팅한 게스트에서 모델 넷(반올림 doub
 카운터와 잘린 모델의 거부를 확인한다.
 
 ```bash
-python3 tests/e2e/kn1_v6_test.py
+make test-v6
 ```
 
 컴파일러 출력이 바뀌면 시험 벡터를 다시 만들어 커밋한다. 커밋본이 다르면
 V3(`ctest`)가 실패한다.
 
 ```bash
-cmake --build build/compiler --target update-conv-vectors
+make update-vectors
 ```
 
 ## CI
@@ -276,7 +280,8 @@ cmake --build build/compiler --target update-conv-vectors
 GitHub Actions에서는 push마다 defconfig, `check-package`, `reuse lint`,
 NPU 공유 코어 시험(V2, V3), 모델 컴파일러 시험(V2~V4), 런타임 호스트 시험,
 바인딩과 디바이스 트리의 스키마 검사를 돌리고(`ci.yml`), 매일 밤과 수동 실행
-때 전체 빌드, 부팅 시험, V1, V5, V6을 돌린다(`nightly.yml`).
+때 전체 빌드, 부팅 시험, V1, V5, V6을 돌린다(`nightly.yml`). 두 워크플로는
+위의 `make` 대상을 부른다.
 
 ## 현재 상태
 

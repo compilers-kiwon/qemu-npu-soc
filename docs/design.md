@@ -914,6 +914,8 @@ push CI는 aarch64 교차 gcc와 qemu-user도 설치한다. 바인딩과 DT의
 스키마 검사(`tests/dt/check-dt.sh`)도 push마다 돈다. 야간 작업은 전체 빌드,
 부팅 스모크 시험(`tests/boot/`, M1.2 완료 조건), V1(`tests/qemu/run-v1.sh`),
 V5(`tests/driver/kn1_v5_test.py`), V6(`tests/e2e/kn1_v6_test.py`)을 돌린다.
+빌드와 시험의 진입점은 저장소 맨 위 `Makefile`의 대상이고(`make`, `make test`,
+`make check`), CI도 같은 대상을 부른다.
 
 ---
 
@@ -934,7 +936,8 @@ qemu-npu-soc/
 ├── br2-external/    Buildroot 외부 트리(defconfig, 커널 설정, 패키지, 패치)
 ├── buildroot/       Buildroot 서브모듈(고정)
 ├── models/          .tflite 모델과 만드는 스크립트, 컴파일한 시험 벡터
-└── tests/           장치, 드라이버, 컴파일러, 끝-끝 시험
+├── tests/           장치, 드라이버, 컴파일러, 끝-끝 시험
+└── Makefile         빌드와 시험의 진입점(README와 CI가 부름)
 ```
 
 ### 12.2 고정 버전 (2026-11-05 기준 최신 안정판)
