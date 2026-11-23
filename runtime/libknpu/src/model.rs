@@ -290,7 +290,7 @@ impl Model {
         })
     }
 
-    /// The checks of docs/model-format.md 9 that need the device: the
+    /// The checks of docs/model-format.md 11 that need the device: the
     /// specification version, the SRAM size and the number of regions.
     pub fn check_device(&self, info: &DeviceInfo) -> Result<()> {
         if u32::from(self.spec_major) != info.version_major {

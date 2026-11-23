@@ -20,9 +20,10 @@ def Knpu_Dialect : Dialect {
     Command operations (`knpu.dma`, `knpu.conv`, `knpu.pool`,
     `knpu.dma_wait`, `knpu.kernel_wait`, `knpu.stop`) follow the commands of
     the NPU specification (docs/npu-spec.md) almost one to one; the values of
-    the SET commands are attributes. `knpu.region`, `knpu.io` and
-    `knpu.cpu_step` describe the region table, the model inputs and outputs
-    and the CPU steps of `model.knpu` (docs/model-format.md).
+    the SET commands are attributes. `knpu.region`, `knpu.io`,
+    `knpu.cpu_step` and `knpu.cpu_code` describe the region table, the model
+    inputs and outputs, the CPU steps and the CPU code of `model.knpu`
+    (docs/model-format.md).
   }];
   let cppNamespace = "::mlir::knpu";
 }

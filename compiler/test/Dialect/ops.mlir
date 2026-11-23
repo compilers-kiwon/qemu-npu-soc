@@ -67,6 +67,8 @@ module attributes {knpu.sram_size = 65536 : i64} {
   knpu.cpu_step "call" @layer2
   // CHECK: knpu.cpu_step "copy_out" @act2 arena[32] size 8
   knpu.cpu_step "copy_out" @act2 arena [32] size 8
+  // CHECK: knpu.cpu_code dense<[127, 69, 76, 70]> : tensor<4xi8>
+  knpu.cpu_code dense<[127, 69, 76, 70]> : tensor<4xi8>
   // CHECK-LABEL: func.func @pool
   func.func @pool() {
     // CHECK: knpu.pool {clamp = array<i64: -100, 100>, ifm = 0 : i64, ifm_shape = array<i64: 4, 4, 2>, kernel = array<i64: 3, 3>, ofm = 32 : i64, ofm_shape = array<i64: 2, 2, 2>, pad = array<i64: 1, 1, 1, 1>, stride = array<i64: 2, 2>}

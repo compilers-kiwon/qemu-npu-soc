@@ -8,9 +8,10 @@
 #   V3  test_conv_model.py: the tflite2c C on gcc, and lcc -> knpu-compile
 #       -> knpu_run (shared NPU core), both compared with V2
 #   V3  test_mnist_model.py: the MNIST CNN of M2 (so far its V2 outputs and
-#       logits, from TFLite Micro and from the tflite2c C on gcc, and the
-#       NPU part through lcc -> knpu-compile -> knpu_run, docs/plan.md M2.1
-#       to M2.4)
+#       logits, from TFLite Micro and from the tflite2c C on gcc, the NPU
+#       part through lcc -> knpu-compile -> knpu_run, and the whole model
+#       with its CPU steps on cpu_run under qemu-aarch64, docs/plan.md M2.1
+#       to M2.5)
 #   V2  test_softmax.py: the tflite2c softmax on gcc against TFLite Micro,
 #       over input scales, betas and row lengths
 
@@ -80,6 +81,29 @@ add_custom_target(update-conv-vectors
   DEPENDS knpu-compile knpu_run tflm_run_double tflm_run_single
   USES_TERMINAL)
 
+# cpu_run runs the CPU steps of a model (tests/compiler/cpu_run.c). It is
+# an aarch64 program, built with the cross gcc and run on qemu-aarch64 user
+# mode with the cross C library.
+find_program(KNPU_AARCH64_CC aarch64-linux-gnu-gcc)
+find_program(KNPU_QEMU_AARCH64 qemu-aarch64)
+set(KNPU_AARCH64_SYSROOT /usr/aarch64-linux-gnu CACHE PATH
+    "The aarch64 C library qemu-aarch64 runs cpu_run with")
+if(NOT KNPU_AARCH64_CC OR NOT KNPU_QEMU_AARCH64 OR
+   NOT EXISTS ${KNPU_AARCH64_SYSROOT}/lib/ld-linux-aarch64.so.1)
+  message(FATAL_ERROR "V3 of the CPU code needs aarch64-linux-gnu-gcc, "
+                      "qemu-aarch64 and the aarch64 C library in "
+                      "${KNPU_AARCH64_SYSROOT} (apt packages "
+                      "gcc-aarch64-linux-gnu, libc6-dev-arm64-cross and "
+                      "qemu-user)")
+endif()
+set(CPU_RUN ${CMAKE_CURRENT_BINARY_DIR}/cpu_run)
+add_custom_command(OUTPUT ${CPU_RUN}
+  COMMAND ${KNPU_AARCH64_CC} -std=gnu11 -O2 -Wall -Wextra -o ${CPU_RUN}
+          ${CMAKE_CURRENT_SOURCE_DIR}/cpu_run.c
+  DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/cpu_run.c
+  COMMENT "Building cpu_run for aarch64")
+add_custom_target(cpu_run_aarch64 ALL DEPENDS ${CPU_RUN})
+
 set(MNIST_MODEL_TEST
   ${CMAKE_CURRENT_SOURCE_DIR}/test_mnist_model.py
   --model ${KNPU_REPO_DIR}/models/mnist/mnist.tflite
@@ -92,6 +116,9 @@ set(MNIST_MODEL_TEST
   --knpu-run $<TARGET_FILE:knpu_run>
   --tflm-double $<TARGET_FILE:tflm_run_double>
   --tflm-single $<TARGET_FILE:tflm_run_single>
+  --cpu-run ${CPU_RUN}
+  --qemu ${KNPU_QEMU_AARCH64}
+  --qemu-ld-prefix ${KNPU_AARCH64_SYSROOT}
   --work-dir ${CMAKE_CURRENT_BINARY_DIR}/work-mnist)
 
 add_test(NAME v3_mnist_model

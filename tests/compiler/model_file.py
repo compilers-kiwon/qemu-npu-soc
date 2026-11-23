@@ -3,20 +3,24 @@
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 """Reader of model.knpu v0, written from docs/model-format.md alone.
 
-It checks every rule of section 9 of that document, so it also tests the
+It checks the rules of section 11 of that document except those that need
+the device (2, 3) or the loaded CPU code (7), so it also tests the
 compiler's writer against the format document.
 
     model_file.py model.knpu      # print a summary
 """
 
+import re
 import struct
 import sys
 
 MAGIC = b"KNPU"
-CMDS, REGIONS, CONST, TENSORS = 1, 2, 3, 4
+CMDS, REGIONS, CONST, TENSORS, CPU_CODE, CPU_STEPS = 1, 2, 3, 4, 5, 6
 KINDS = {CMDS: "CMDS", REGIONS: "REGIONS", CONST: "CONST",
-         TENSORS: "TENSORS"}
+         TENSORS: "TENSORS", CPU_CODE: "CPU_CODE", CPU_STEPS: "CPU_STEPS"}
 NO_CONTENT = 0xFFFFFFFF
+STEP_KINDS = {0: "copy_in", 1: "call", 2: "copy_out"}
+ET_DYN, EM_AARCH64 = 3, 183
 
 
 class FormatError(Exception):
@@ -37,6 +41,13 @@ class Tensor:
         self.shape, self.scale, self.zero_point = shape, scale, zero_point
 
 
+class Step:
+    def __init__(self, kind, region, name, offset, size):
+        self.kind = kind  # "copy_in", "call" or "copy_out"
+        self.region, self.name = region, name
+        self.offset, self.size = offset, size
+
+
 class Model:
     def __init__(self):
         self.format_minor = 0
@@ -45,6 +56,8 @@ class Model:
         self.cmds = b""
         self.regions = []
         self.tensors = []
+        self.cpu_code = None  # bytes of the shared object, if any
+        self.cpu_steps = []
 
     def words(self):
         return list(struct.unpack(f"<{len(self.cmds) // 4}I", self.cmds))
@@ -96,6 +109,10 @@ def read(data):
     counts = {k: sum(1 for kind, _ in sections if kind == k) for k in KINDS}
     _check(counts[CMDS] == 1 and counts[REGIONS] == 1 and
            counts[TENSORS] == 1, "need exactly one CMDS, REGIONS, TENSORS")
+    _check(counts[CPU_CODE] == counts[CPU_STEPS] <= 1,
+           "need both or none of CPU_CODE and CPU_STEPS, at most one each")
+    _check(counts[CPU_CODE] == 0 or minor >= 1,
+           "CPU sections need format_minor 1")
 
     by_kind = {kind: body for kind, body in sections}
     # CMDS (section 5)
@@ -168,7 +185,50 @@ def read(data):
             _check(a.region != b.region or a.offset + a.size <= b.offset or
                    b.offset + b.size <= a.offset,
                    "an input overlaps an output")
+
+    if counts[CPU_CODE]:
+        read_cpu(m, by_kind[CPU_CODE], by_kind[CPU_STEPS])
     return m
+
+
+def read_cpu(m, code, body):
+    """CPU_CODE and CPU_STEPS (sections 9 and 10)."""
+    _check(len(code) >= 64 and code[:4] == b"\x7fELF",
+           "CPU_CODE is not an ELF file")
+    _check(code[4] == 2 and code[5] == 1,
+           "CPU_CODE is not 64-bit little-endian ELF")
+    e_type, e_machine = struct.unpack_from("<HH", code, 16)
+    _check(e_type == ET_DYN, "CPU_CODE is not a shared object")
+    _check(e_machine == EM_AARCH64, "CPU_CODE is not for AArch64")
+    m.cpu_code = code
+
+    _check(len(body) >= 16, "CPU_STEPS is smaller than its header")
+    count, = struct.unpack_from("<I", body, 0)
+    _check(body[4:16] == bytes(12), "reserved CPU_STEPS bytes are not 0")
+    _check(count >= 1, "no CPU steps")
+    names_at = 16 + 16 * count
+    _check(len(body) > names_at, "CPU_STEPS has no name table")
+    names = body[names_at:]
+    _check(names[-1] == 0, "the name table does not end with NUL")
+    for i in range(count):
+        kind, region, res, name, offset, size = struct.unpack_from(
+            "<BBHIII", body, 16 + 16 * i)
+        _check(kind in STEP_KINDS, f"step {i}: bad kind {kind}")
+        _check(res == 0, f"step {i}: reserved field is not 0")
+        _check(name < len(names), f"step {i}: name outside the name table")
+        sym = names[name:names.index(0, name)].decode("ascii", "replace")
+        _check(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", sym) is not None,
+               f"step {i}: name {sym!r} is not a C identifier")
+        if STEP_KINDS[kind] == "call":
+            _check(region == 0 and offset == 0 and size == 0,
+                   f"step {i}: a call has region, offset and size 0")
+        else:
+            regions = [r for r in m.regions if r.index == region]
+            _check(regions and regions[0].role == "arena",
+                   f"step {i}: not in an arena region")
+            _check(size >= 1 and offset + size <= regions[0].size,
+                   f"step {i}: copy outside its region")
+        m.cpu_steps.append(Step(STEP_KINDS[kind], region, sym, offset, size))
 
 
 def main():
@@ -183,6 +243,11 @@ def main():
     for t in m.tensors:
         print(f"{t.direction}: region {t.region} offset {t.offset} "
               f"shape {t.shape} scale {t.scale!r} zero_point {t.zero_point}")
+    if m.cpu_code is not None:
+        print(f"CPU code: {len(m.cpu_code)} bytes")
+    for s in m.cpu_steps:
+        print(f"CPU step {s.kind} {s.name}" + ("" if s.kind == "call" else
+              f" region {s.region} offset {s.offset} size {s.size}"))
 
 
 if __name__ == "__main__":

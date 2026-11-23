@@ -4,14 +4,19 @@
 // knpu-compile: compiles the .mlir that lcc writes for a tflite2c model
 // (lcc -S -Wf-pragma=knpu) into model.knpu. It runs knpu-import, knpu-tile,
 // knpu-schedule, knpu-insert-waits and knpu-estimate and then the model
-// file writer.
+// file writer. With cpu layers it moves their functions into the CPU
+// module and compiles that with lcc-opt, mlir-translate, clang and ld.lld
+// into the CPU code of the model (docs/design.md 9.4).
 //
 //   knpu-compile model.mlir -o model.knpu [--sram-size=BYTES]
 //                [--overlap=false] [--report] [--emit-mlir]
-//                [--insert-waits=false] [--macs-per-cycle=N]
-//                [--dma-bytes-per-cycle=N] [--pool-elements-per-cycle=N]
+//                [--emit-cpu-mlir] [--insert-waits=false]
+//                [--macs-per-cycle=N] [--dma-bytes-per-cycle=N]
+//                [--pool-elements-per-cycle=N] [--lcc-opt=PATH]
+//                [--mlir-translate=PATH] [--clang=PATH] [--ld-lld=PATH]
 
 #include "knpu/Dialect/Knpu/KnpuDialect.h"
+#include "knpu/Target/CpuCode.h"
 #include "knpu/Target/ModelFile.h"
 #include "knpu/Transforms/Passes.h"
 
@@ -54,6 +59,11 @@ static cl::opt<bool> emitMlir("emit-mlir",
                               cl::desc("Write the scheduled MLIR instead of "
                                        "model.knpu"),
                               cl::init(false));
+static cl::opt<bool> emitCpuMlir(
+    "emit-cpu-mlir",
+    cl::desc("Write the CPU module (the cpu layers that lcc-opt compiles) "
+             "instead of model.knpu"),
+    cl::init(false));
 static cl::opt<bool> insertWaits(
     "insert-waits",
     cl::desc("Insert wait commands (turning this off is only for showing "
@@ -69,6 +79,19 @@ static cl::opt<int64_t> poolElementsPerCycle(
     "pool-elements-per-cycle",
     cl::desc("Cycle estimate: average pooling window elements per cycle"),
     cl::init(256));
+// The tools of the CPU code; CMake puts in the ones it built and found
+static cl::opt<std::string> lccOpt("lcc-opt", cl::desc("lcc-opt to run"),
+                                   cl::value_desc("path"),
+                                   cl::init(KNPU_LCC_OPT));
+static cl::opt<std::string>
+    mlirTranslate("mlir-translate", cl::desc("mlir-translate to run"),
+                  cl::value_desc("path"), cl::init(KNPU_MLIR_TRANSLATE));
+static cl::opt<std::string> clang("clang", cl::desc("clang to run"),
+                                  cl::value_desc("path"),
+                                  cl::init(KNPU_CLANG));
+static cl::opt<std::string> ldLld("ld-lld", cl::desc("ld.lld to run"),
+                                  cl::value_desc("path"),
+                                  cl::init(KNPU_LD_LLD));
 
 /// The name of the layer function a command came from (knpu-import puts it
 /// in the location), or "?".
@@ -195,6 +218,27 @@ int main(int argc, char **argv) {
   if (failed(pm.run(*module)))
     return 1;
 
+  // The cpu layers leave the module for the CPU module, which becomes the
+  // AArch64 shared object of knpu.cpu_code (docs/design.md 9.4)
+  OwningOpRef<ModuleOp> cpu;
+  if (!emitMlir) {
+    auto extracted = knpu::extractCpuModule(*module);
+    if (failed(extracted))
+      return 1;
+    cpu = std::move(*extracted);
+    if (emitCpuMlir && !cpu) {
+      llvm::errs() << "knpu-compile: the model has no cpu layers\n";
+      return 1;
+    }
+    if (cpu && !emitCpuMlir) {
+      auto code = knpu::compileCpuModule(
+          *cpu, {lccOpt, mlirTranslate, clang, ldLld});
+      if (failed(code))
+        return 1;
+      knpu::addCpuCode(*module, *code);
+    }
+  }
+
   auto output = openOutputFile(outputFile, &error);
   if (!output) {
     llvm::errs() << "knpu-compile: " << error << "\n";
@@ -202,6 +246,8 @@ int main(int argc, char **argv) {
   }
   if (emitMlir)
     module->print(output->os());
+  else if (emitCpuMlir)
+    cpu->print(output->os());
   else if (failed(knpu::writeModelFile(*module, output->os())))
     return 1;
   output->keep();

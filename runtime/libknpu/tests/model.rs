@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 //! Model::parse on the committed test models (models/conv/vectors/) and on
-//! copies broken one rule at a time (docs/model-format.md 9).
+//! copies broken one rule at a time (docs/model-format.md 11).
 
 use std::path::PathBuf;
 

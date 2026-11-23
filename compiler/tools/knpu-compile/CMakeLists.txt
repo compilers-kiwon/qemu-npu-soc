@@ -13,3 +13,13 @@ target_link_libraries(knpu-compile PRIVATE
   MLIRPass
 )
 mlir_check_all_link_libraries(knpu-compile)
+
+# The default tools of the CPU code (compiler/cmake/deps.cmake); lcc-opt is
+# built before knpu-compile
+target_compile_definitions(knpu-compile PRIVATE
+  KNPU_LCC_OPT="${KNPU_LCC_OPT}"
+  KNPU_MLIR_TRANSLATE="${KNPU_MLIR_TRANSLATE}"
+  KNPU_CLANG="${KNPU_CLANG}"
+  KNPU_LD_LLD="${KNPU_LD_LLD}"
+)
+add_dependencies(knpu-compile lcc-opt)

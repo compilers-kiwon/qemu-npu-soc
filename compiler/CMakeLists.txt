@@ -50,7 +50,9 @@ link_directories(${LLVM_BUILD_LIBRARY_DIR})
 separate_arguments(llvm_definitions NATIVE_COMMAND ${LLVM_DEFINITIONS})
 add_definitions(${llvm_definitions})
 
-# Pinned downloads: lcc, the TFLite Python schema (docs/design.md 12.2)
+# Pinned downloads (lcc, the lcc_llvm source lcc-opt is built from, the
+# TFLite Python schema) and the tools of the CPU code (docs/design.md
+# 9.4, 12.2)
 include(cmake/deps.cmake)
 
 add_subdirectory(include/knpu/Dialect/Knpu)

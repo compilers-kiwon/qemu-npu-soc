@@ -78,8 +78,9 @@ def read(path):
         return f.read()
 
 
-def run_npu(args, model, inp, work, tag):
-    """Runs model.knpu on knpu_run; returns (result dict, output bytes)."""
+def run_npu(args, model, inp, work, tag, arena=False):
+    """Runs model.knpu on knpu_run; returns (result dict, output bytes), or
+    with arena the bytes of the output's whole region instead."""
     cmd = [args.knpu_run, "--sram-size", str(model.sram_size),
            "--queue", f"{QBASE:#x}:{len(model.cmds):#x}",
            "--mem", f"{QBASE:#x}:{len(model.cmds):#x}:"
@@ -97,9 +98,11 @@ def run_npu(args, model, inp, work, tag):
         cmd += ["--region", f"{r.index}:{REGION_ADDR[r.index]:#x}",
                 "--mem", f"{REGION_ADDR[r.index]:#x}:{r.size:#x}:{path}"]
     out = next(t for t in model.tensors if t.direction == "output")
+    start, size = REGION_ADDR[out.region] + out.offset, out.size
+    if arena:
+        start, size = REGION_ADDR[out.region], model.region(out.region).size
     dump = os.path.join(work, f"{tag}-out.bin")
-    cmd += ["--dump",
-            f"{REGION_ADDR[out.region] + out.offset:#x}:{out.size:#x}:{dump}"]
+    cmd += ["--dump", f"{start:#x}:{size:#x}:{dump}"]
     text = run(cmd).stdout
     result = {k: int(v, 0) for k, v in (f.split("=") for f in text.split())}
     data = read(dump) if result["err_code"] == 0 else None

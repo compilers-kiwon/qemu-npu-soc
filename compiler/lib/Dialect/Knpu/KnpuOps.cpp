@@ -341,3 +341,11 @@ LogicalResult CpuStepOp::verify() {
     return emitOpError("size must be in 1..2^32-1");
   return success();
 }
+
+LogicalResult CpuCodeOp::verify() {
+  auto type = llvm::cast<ShapedType>(getCode().getType());
+  if (type.getRank() != 1 || !type.getElementType().isInteger(8) ||
+      type.getDimSize(0) < 1)
+    return emitOpError("code must be a non-empty 1-D i8 tensor");
+  return success();
+}

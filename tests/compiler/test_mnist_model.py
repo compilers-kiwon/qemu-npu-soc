@@ -3,8 +3,8 @@
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 """V2 and V3 of the MNIST CNN of M2 (docs/plan.md M2.1 to M2.8).
 
-So far (M2.1 to M2.4) the model, its references, the generator and the NPU
-part of the compiled model:
+So far (M2.1 to M2.5) the model, its references, the generator and the
+compiled model:
 
 1. models/mnist/mnist.tflite has the operators of docs/design.md 6.6 and
    its nominal MACs and parameters.
@@ -31,6 +31,14 @@ part of the compiled model:
    estimated cycles (--report) are fewer with overlap.
 7. Compiled without wait commands (--insert-waits=false), the model stops
    with a synchronization error.
+8. V3 of the whole model: knpu-compile turns lcc's output of the full C into
+   model.knpu with the softmax layer as CPU code (format minor 1), for both
+   SRAM sizes. Two compiles give the same bytes; the shared object exports
+   the functions and arrays of the CPU steps and has no text relocations.
+   knpu_run runs the NPU part, which leaves V2's logits in the arena, and
+   cpu_run, an aarch64 program on qemu-aarch64 user mode, loads the CPU
+   code as the runtime does and runs the CPU steps on that arena: the
+   output must equal V2's.
 
 Inputs: the ten digit images (models/mnist/digits/), three random inputs,
 all -128 and all 127. The random inputs come from a seeded stream: the
@@ -45,6 +53,7 @@ import importlib.util
 import os
 import random
 import re
+import struct
 import subprocess
 import sys
 
@@ -69,6 +78,11 @@ OP_STOP, OP_CONV, OP_ADD, OP_AVGPOOL = 0x0000, 0x0002, 0x0003, 0x0004
 OP_DMA = 0x0010
 SET_DMA_COUNT, SET_DMA_SRC, SET_DMA_LEN = 0x0108, 0x4010, 0x4012
 CMD_PAYLOAD, SPACE_SRAM = 0x4000, 1
+
+# ELF (the CPU code)
+SHT_DYNAMIC, SHT_DYNSYM = 6, 11
+STT_OBJECT, STT_FUNC = 1, 2
+DT_TEXTREL, DT_FLAGS, DF_TEXTREL = 22, 30, 0x4
 
 
 class Checker:
@@ -171,6 +185,32 @@ def stream_counters(model):
     return rd, wr, ops
 
 
+def elf_exports(code):
+    """The defined dynamic symbols of a 64-bit little-endian ELF shared
+    object as {name: (type, size)}, and whether it has text relocations."""
+    shoff, = struct.unpack_from("<Q", code, 0x28)
+    shentsize, shnum = struct.unpack_from("<HH", code, 0x3A)
+    sections = [struct.unpack_from("<IIQQQQIIQQ", code, shoff + i * shentsize)
+                for i in range(shnum)]
+    exports, textrel = {}, False
+    for _, sh_type, _, _, offset, size, link, _, _, entsize in sections:
+        if sh_type == SHT_DYNSYM:
+            names = sections[link][4]
+            for at in range(offset + entsize, offset + size, entsize):
+                name, info, _, shndx, _, sym_size = struct.unpack_from(
+                    "<IBBHQQ", code, at)
+                if shndx:
+                    end = code.index(0, names + name)
+                    exports[code[names + name:end].decode()] = (info & 0xF,
+                                                                sym_size)
+        elif sh_type == SHT_DYNAMIC:
+            for at in range(offset, offset + size, 16):
+                tag, value = struct.unpack_from("<qQ", code, at)
+                textrel |= tag == DT_TEXTREL or (tag == DT_FLAGS and
+                                                 bool(value & DF_TEXTREL))
+    return exports, textrel
+
+
 def top1(data):
     """Index of the largest int8 element (the first one on a tie)."""
     values = [b - 256 if b > 127 else b for b in data]
@@ -181,7 +221,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     for opt in ("model", "digits", "tflite2c", "schema", "lcc-dir", "cc",
                 "knpu-compile", "knpu-run", "tflm-double", "tflm-single",
-                "work-dir"):
+                "cpu-run", "qemu", "qemu-ld-prefix", "work-dir"):
         ap.add_argument(f"--{opt}", required=True)
     args = ap.parse_args()
     work = args.work_dir
@@ -335,6 +375,57 @@ def main():
         c.check(result["err_code"] == ERR_SYNC,
                 f"{tag}: SYNC error without waits "
                 f"(err_code {result['err_code']:#x})")
+
+    # V3: the whole model, the NPU part on the shared core and the CPU
+    # steps on qemu-aarch64
+    for mode in ("double", "single"):
+        mlir = os.path.join(work, f"mnist-{mode}.mlir")
+        for sram, size_name in SRAM_SIZES.items():
+            tag = f"{mode}-{size_name}-full"
+            knpu = os.path.join(work, f"mnist-{tag}.knpu")
+            again = os.path.join(work, f"mnist-{tag}-again.knpu")
+            for path in (knpu, again):
+                run([args.knpu_compile, f"--sram-size={sram}", mlir,
+                     "-o", path])
+            data = read(knpu)
+            c.check(read(again) == data,
+                    f"{tag}: two compiles of the same input differ")
+            model = model_file.read(data)
+            c.check(model.format_minor == 1 and model.cpu_code is not None,
+                    f"{tag}: no CPU sections")
+            exports, textrel = elf_exports(model.cpu_code)
+            for s in model.cpu_steps:
+                got = exports.get(s.name, (None, 0))
+                c.check(got[0] == STT_FUNC if s.kind == "call"
+                        else got == (STT_OBJECT, s.size),
+                        f"{tag}: the CPU code exports {s.name} as {got}")
+            c.check(not textrel, f"{tag}: the CPU code has text relocations")
+            logits = next(s for s in model.cpu_steps if s.kind == "copy_in")
+            out = next(t for t in model.tensors if t.direction == "output")
+            for n, inp in zip(names, inputs):
+                result, arena = run_npu(args, model, inp, work,
+                                        f"npu-{tag}-{n}", arena=True)
+                c.check(result["err_code"] == 0 and result["macs"] == MACS,
+                        f"{tag} {n}: err_code {result['err_code']:#x}, "
+                        f"PERF_MACS {result['macs']}")
+                if arena is None:
+                    continue
+                c.check(arena[logits.offset:logits.offset + logits.size]
+                        == golden[mode, n][1],
+                        f"{tag} {n}: logits in the arena differ from V2")
+                arena_in = write(os.path.join(work, f"cpu-{tag}-{n}-in.bin"),
+                                 arena)
+                arena_out = os.path.join(work, f"cpu-{tag}-{n}-out.bin")
+                r = subprocess.run([args.qemu, "-L", args.qemu_ld_prefix,
+                                    args.cpu_run, knpu, arena_in, arena_out],
+                                   capture_output=True, text=True)
+                c.check(r.returncode == 0 and not r.stderr,
+                        f"{tag} {n}: cpu_run exit {r.returncode} "
+                        f"{r.stderr.strip()}")
+                if r.returncode == 0:
+                    c.check(read(arena_out)[out.offset:out.offset + out.size]
+                            == golden[mode, n][0],
+                            f"{tag} {n}: output differs from V2")
 
     print(f"{c.passes} passed, {c.failures} failed")
     sys.exit(1 if c.failures else 0)

@@ -246,4 +246,17 @@ def Knpu_CpuStepOp : Knpu_Op<"cpu_step"> {
   let hasVerifier = 1;
 }
 
+def Knpu_CpuCodeOp : Knpu_Op<"cpu_code"> {
+  let summary = "The CPU code of model.knpu";
+  let description = [{
+    The bytes of the AArch64 shared object that knpu-compile builds from
+    the functions of the cpu layers (docs/design.md 9.4), as a 1-D i8
+    tensor. It exports the functions and arrays the `knpu.cpu_step`
+    operations name (docs/model-format.md 9).
+  }];
+  let arguments = (ins ElementsAttr:$code);
+  let assemblyFormat = "$code attr-dict";
+  let hasVerifier = 1;
+}
+
 #endif // KNPU_OPS_TD

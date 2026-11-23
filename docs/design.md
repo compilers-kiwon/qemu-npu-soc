@@ -858,13 +858,15 @@ CPU 섹션 둘은 형식 minor 1에서 더했다. CPU 층이 있는 모델만 �
 `runtime/`은 cargo 작업 공간이고 크레이트가 둘이다(D41).
 
 - `libknpu`(라이브러리 이름 `knpu`): 장치를 열고 조회하며(`KNPU_QUERY`),
-  `model.knpu`를 읽어 형식 9절대로 검사한다. 이때 장치의 `VERSION.MAJOR`,
+  `model.knpu`를 읽어 형식 11절대로 검사한다. 이때 장치의 `VERSION.MAJOR`,
   `SRAM_SIZE`와도 비교한다. 영역마다 버퍼를 만들어 매핑하고, 상수 영역을
   채우고, 명령열을 만든다. 실행할 때마다 입력을 arena로 복사하고, perfmon을
   붙여 제출하고 기다린 뒤, 출력과 카운터 네 개를 돌려준다.
 - CPU 층(D45): 모델에 CPU 섹션이 있으면, 모델을 올릴 때 공유 객체를
   `memfd_create`로 만든 파일에 써서 `dlopen`하고 단계 표의 함수와 배열을
-  `dlsym`으로 찾는다. 실행할 때마다 NPU 작업이 끝난 뒤 단계 표대로 arena의
+  `dlsym`으로 찾는다. 찾은 기호는 `dladdr1`로 동적 기호 표의 값을 읽어,
+  부를 것은 함수이고 복사할 것은 크기가 단계와 같은 객체인지 확인한다(형식
+  11절 7번). 실행할 때마다 NPU 작업이 끝난 뒤 단계 표대로 arena의
   텐서를 공유 객체의 배열로 복사하고, 층 함수를 부르고, 결과를 arena의 출력
   자리로 복사한다. 그래서 출력은 CPU 층이 있든 없든 arena에서 꺼낸다.
 - `knpu-infer`(바이너리): `knpu-infer [--device PATH] MODEL INPUT
@@ -874,9 +876,9 @@ CPU 섹션 둘은 형식 minor 1에서 더했다. CPU 층이 있는 모델만 �
   출력이 분류 벡터(원소가 둘 이상이고 마지막 차원 밖은 모두 1)이면 가장 큰
   원소의 번호(같으면 앞의 것)를 `top1=`로 찍는다.
 - 시스템 호출 `ioctl`, `mmap`, `munmap`, `clock_gettime`, `memfd_create`와
-  libc 함수 `dlopen`, `dlsym`, `dlerror`, `dlclose`는 `extern "C"`로 직접
-  선언한다. Rust 표준 라이브러리가 이미 glibc를 링크하고, glibc는 2.34부터
-  `dlopen` 계열을 libc에 둔다(대상은 2.44).
+  libc 함수 `dlopen`, `dlsym`, `dladdr1`, `dlerror`, `dlclose`는
+  `extern "C"`로 직접 선언한다. Rust 표준 라이브러리가 이미 glibc를 링크하고,
+  glibc는 2.34부터 `dlopen` 계열을 libc에 둔다(대상은 2.44).
 - UAPI 구조체와 ioctl 번호는 `#[repr(C)]` 타입과 상수로 손으로 옮긴다.
   호스트 시험이 `knpu_accel.h`를 C로 컴파일해 구조체 크기, 필드 위치, ioctl
   번호를 뽑아 Rust 정의와 비교한다. ioctl 번호의 인코딩은 x86_64와

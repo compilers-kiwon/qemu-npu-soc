@@ -195,3 +195,13 @@ knpu.cpu_step "call" @f arena [0] size 4
 
 // expected-error @+1 {{a copy needs an arena offset and a size}}
 knpu.cpu_step "copy_in" @a
+
+// -----
+
+// expected-error @+1 {{code must be a non-empty 1-D i8 tensor}}
+knpu.cpu_code dense<[1, 2]> : tensor<2xi32>
+
+// -----
+
+// expected-error @+1 {{code must be a non-empty 1-D i8 tensor}}
+knpu.cpu_code dense<> : tensor<0xi8>

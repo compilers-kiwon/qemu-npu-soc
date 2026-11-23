@@ -6,6 +6,7 @@
 include_directories(${KNPU_REPO_DIR}/hw/npu-core)
 
 add_mlir_library(KnpuTarget
+  CpuCode.cpp
   ModelFile.cpp
 
   ADDITIONAL_HEADER_DIRS
@@ -16,6 +17,7 @@ add_mlir_library(KnpuTarget
 
   LINK_LIBS PUBLIC
   KnpuDialect
+  MLIRBytecodeWriter
   MLIRFuncDialect
   MLIRIR
   MLIRTranslateLib

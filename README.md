@@ -44,9 +44,10 @@ MLIR로 컴파일해 이 NPU에서 돌리고, 결과를 TFLite Micro 참조 구�
 | Rust | 1.97.1(Buildroot 2026.08.1의 `host-rust-bin`) | Buildroot |
 
 컴파일러와 그 시험이 빌드할 때 받는 것(모두 SHA-256 검사): lcc
-`v4.2-llvm.3`의 aarch64 mlir 드라이버, TensorFlow Lite Micro
-`fd2a85d`(소스와 Python 스키마), FlatBuffers v25.9.23(C++ 소스). 생성기가
-쓰는 PyPI `flatbuffers`도 25.9.23으로 고정한다.
+`v4.2-llvm.3`의 aarch64 mlir 드라이버, 같은 태그의 lcc_llvm 소스(lcc-opt만
+빌드한다), TensorFlow Lite Micro `fd2a85d`(소스와 Python 스키마),
+FlatBuffers v25.9.23(C++ 소스). 생성기가 쓰는 PyPI `flatbuffers`도
+25.9.23으로 고정한다.
 
 ## 요구 사항
 
@@ -191,12 +192,15 @@ C를 MLIR로 내리면, `knpu-compile`이 MLIR 패스(가져오기, 타일링, �
 지금은 합성곱 층만 다룬다.
 
 apt.llvm.org의 LLVM 23 패키지(`libmlir-23-dev`, `mlir-23-tools`,
-`llvm-23-dev`, `llvm-23-tools`), CMake, Ninja, Python 3과 `python3-venv`가
-필요하다. `make check-compiler`가 `build/py-venv`에 venv를 만들어 PyPI
-`flatbuffers` 25.9.23을 받고, 구성 단계에서 lcc 릴리스 압축(x86_64에서
-도는 aarch64용 mlir 드라이버), TensorFlow Lite Micro와 FlatBuffers 소스,
-TFLite Python 스키마를 내려받아 SHA-256을 검사한다. lcc는 라이선스 때문에
-저장소에 넣지 않는다(설계 12.4절).
+`llvm-23-dev`, `llvm-23-tools`, `clang-23`, `lld-23`), CMake, Ninja,
+Python 3과 `python3-venv`가 필요하다. 시험에는 `gcc-aarch64-linux-gnu`,
+`libc6-dev-arm64-cross`, `qemu-user`도 필요하다(모델의 CPU 코드를
+qemu-aarch64에서 돌린다). `make check-compiler`가 `build/py-venv`에 venv를
+만들어 PyPI `flatbuffers` 25.9.23을 받고, 구성 단계에서 lcc 릴리스
+압축(x86_64에서 도는 aarch64용 mlir 드라이버), lcc-opt를 빌드할 lcc_llvm
+소스 압축, TensorFlow Lite Micro와 FlatBuffers 소스, TFLite Python 스키마를
+내려받아 SHA-256을 검사한다. lcc는 라이선스 때문에 저장소에 넣지 않는다(설계
+12.4절).
 
 ```bash
 make check-compiler

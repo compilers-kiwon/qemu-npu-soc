@@ -10,7 +10,8 @@
 namespace mlir::knpu {
 
 /// Writes a scheduled module (command operations, knpu.region, knpu.io and
-/// the knpu.sram_size attribute) as model.knpu v0 (docs/model-format.md).
+/// the knpu.sram_size attribute) as model.knpu v0 (docs/model-format.md);
+/// with knpu.cpu_code and knpu.cpu_step, as format minor 1.
 LogicalResult writeModelFile(ModuleOp module, llvm::raw_ostream &os);
 
 /// Registers the "knpu-to-model" translation for knpu-translate.

@@ -6,6 +6,8 @@
 // SET command only when its value changes. Base addresses and shapes are
 // always set before their first use. A wait command is emitted right before
 // the OP word of the next command, after that command's SET commands.
+// A model with cpu layers also gets the CPU_CODE and CPU_STEPS sections of
+// format minor 1 from knpu.cpu_code and knpu.cpu_step.
 
 #include "knpu/Target/ModelFile.h"
 
@@ -14,6 +16,7 @@
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Tools/mlir-translate/Translation.h"
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/StringExtras.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -155,7 +158,17 @@ enum SectionKind : uint32_t {
   kRegions = 2,
   kConst = 3,
   kTensors = 4,
+  kCpuCode = 5,
+  kCpuSteps = 6,
 };
+
+/// A symbol name of CPU_STEPS: a non-empty C identifier
+/// (docs/model-format.md 10).
+bool isCIdentifier(StringRef name) {
+  return !name.empty() && !llvm::isDigit(name.front()) &&
+         llvm::all_of(name,
+                      [](char c) { return llvm::isAlnum(c) || c == '_'; });
+}
 
 } // namespace
 
@@ -173,11 +186,17 @@ LogicalResult mlir::knpu::writeModelFile(ModuleOp module,
   func::FuncOp program;
   SmallVector<RegionOp> regions;
   SmallVector<IoOp> ios;
+  SmallVector<CpuStepOp> steps;
+  SmallVector<CpuCodeOp> codes;
   for (Operation &op : *module.getBody()) {
     if (auto r = dyn_cast<RegionOp>(op))
       regions.push_back(r);
     else if (auto io = dyn_cast<IoOp>(op))
       ios.push_back(io);
+    else if (auto s = dyn_cast<CpuStepOp>(op))
+      steps.push_back(s);
+    else if (auto c = dyn_cast<CpuCodeOp>(op))
+      codes.push_back(c);
     else if (auto f = dyn_cast<func::FuncOp>(op);
              f && f.getSymName() == kModelFunc && !program)
       program = f;
@@ -237,7 +256,8 @@ LogicalResult mlir::knpu::writeModelFile(ModuleOp module,
       return io.emitOpError("is outside its region");
   }
 
-  // Layout: header, section table, CMDS, REGIONS, CONST..., TENSORS
+  // Layout: header, section table, CMDS, REGIONS, CONST..., TENSORS and
+  // with cpu layers CPU_CODE, CPU_STEPS
   struct Section {
     uint32_t kind;
     Bytes body;
@@ -288,10 +308,61 @@ LogicalResult mlir::knpu::writeModelFile(ModuleOp module,
   }
   sections.push_back(std::move(tensors));
 
+  // CPU code and steps, format minor 1 (docs/model-format.md 9, 10). The
+  // copies use the arena region, the one knpu.cpu_step calls "arena".
+  bool cpu = !steps.empty() || !codes.empty();
+  if (cpu) {
+    if (steps.empty() || codes.size() != 1)
+      return module.emitError("CPU code needs one knpu.cpu_code and at "
+                              "least one knpu.cpu_step");
+    RegionOp arena;
+    for (RegionOp r : regions) {
+      if (r.getRole() != "arena")
+        continue;
+      if (arena)
+        return r.emitOpError("CPU steps need a single arena region");
+      arena = r;
+    }
+    if (!arena)
+      return steps.front().emitOpError("needs an arena region");
+
+    Section code{kCpuCode, {}};
+    for (const APInt &v : codes.front().getCode().getValues<APInt>())
+      code.body.u8(static_cast<uint8_t>(v.getZExtValue()));
+    sections.push_back(std::move(code));
+
+    Section stepTable{kCpuSteps, {}};
+    stepTable.body.u32(steps.size());
+    stepTable.body.zeros(12);
+    Bytes names;
+    for (CpuStepOp s : steps) {
+      StringRef name = s.getSymbol();
+      if (!isCIdentifier(name))
+        return s.emitOpError("symbol must be a C identifier");
+      StringRef kind = s.getKind();
+      bool copy = kind != "call";
+      int64_t offset = copy ? *s.getOffset() : 0;
+      int64_t size = copy ? *s.getSize() : 0;
+      if (offset + size > static_cast<int64_t>(arena.getSize()))
+        return s.emitOpError("copies outside the arena");
+      stepTable.body.u8(kind == "copy_in" ? 0 : kind == "call" ? 1 : 2);
+      stepTable.body.u8(copy ? arena.getIndex() : 0);
+      stepTable.body.u16(0);
+      stepTable.body.u32(names.size());
+      stepTable.body.u32(offset);
+      stepTable.body.u32(size);
+      for (char c : name)
+        names.u8(c);
+      names.u8(0);
+    }
+    llvm::append_range(stepTable.body.data, names.data);
+    sections.push_back(std::move(stepTable));
+  }
+
   Bytes file;
   file.u8('K'), file.u8('N'), file.u8('P'), file.u8('U');
   file.u16(0); // format_major
-  file.u16(0); // format_minor
+  file.u16(cpu ? 1 : 0); // format_minor
   file.u32(sramSize);
   file.u16(KNPU_VERSION_MAJOR);
   file.u16(sections.size());

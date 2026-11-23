@@ -5,12 +5,17 @@
  * The pragmas of M2 in the shape tflite2c writes them (docs/design.md 9.3):
  * a convolution, an average pooling, a reshape, a fully connected layer
  * and a cpu layer, through the pinned lcc release (lcc -S
- * -Wf-pragma=knpu), knpu-import and the NPU passes. The model file with
- * the CPU code is M2.5's (docs/plan.md).
+ * -Wf-pragma=knpu), knpu-import and the NPU passes, and knpu-compile with
+ * the CPU code that lcc-opt, mlir-translate, clang and ld.lld make
+ * (docs/design.md 9.4).
  *
  * RUN: %lcc -Wf-pragma=knpu -S %s -o %t.mlir
  * RUN: knpu-opt --knpu-import %t.mlir | FileCheck %s
  * RUN: knpu-opt --knpu-import --knpu-tile=sram-size=4096 --knpu-schedule=sram-size=4096 --knpu-insert-waits %t.mlir | FileCheck %s --check-prefix=CMD
+ * RUN: knpu-compile --sram-size=4096 --emit-cpu-mlir %t.mlir | FileCheck %s --check-prefix=CPU --implicit-check-not=func.func --implicit-check-not=llvm.mlir.global --implicit-check-not=knpu.
+ * RUN: knpu-compile --sram-size=4096 %t.mlir -o %t.knpu
+ * RUN: od -A x -t x4 -v -w4 %t.knpu | FileCheck %s --check-prefix=FILE
+ * RUN: not knpu-compile --sram-size=4096 --lcc-opt=%t.none %t.mlir -o %t.bad 2>&1 | FileCheck %s --check-prefix=TOOL
  *
  * The NPU layers, their constants and the helper only they call are gone;
  * the cpu layer stays with external linkage, with its helper and arrays.
@@ -53,6 +58,46 @@
  * CMD-NEXT:    knpu.kernel_wait 0
  * CMD-NEXT:    knpu.dma "store" region 1[48] sram[80] length 3
  * CMD-NEXT:    knpu.stop
+ *
+ * The CPU module has the cpu layer, its helper and its two arrays, and the
+ * target of lcc's output, but nothing of the NPU part and no knpu.*
+ * attribute: lcc-opt does not turn globals that function attributes name
+ * into memrefs (docs/design.md 9.4).
+ * CPU:         module attributes {llvm.data_layout = "{{.*}}", llvm.target_triple = "aarch64-unknown-linux-gnu"} {
+ * CPU:         func.func @knpu_halve(
+ * CPU:         func.func @layer5() attributes {llvm.linkage = #llvm.linkage<external>} {
+ * CPU-DAG:     llvm.mlir.global external @act4()
+ * CPU-DAG:     llvm.mlir.global external @act5()
+ *
+ * The model file is format minor 1 with six sections; the fifth,
+ * CPU_CODE, is an AArch64 shared object (ELF64, little endian, ET_DYN,
+ * EM_AARCH64) and the sixth, CPU_STEPS, has the three steps above
+ * (docs/model-format.md 9, 10).
+ * FILE:        000000 55504e4b
+ * FILE-NEXT:   000004 00010000
+ * FILE-NEXT:   000008 00001000
+ * FILE-NEXT:   00000c 00060000
+ * FILE:        000060 00000005
+ * FILE-NEXT:   000064 [[#%.8x,CODE:]]
+ * FILE:        000070 00000006
+ * FILE-NEXT:   000074 [[#%.8x,STEPS:]]
+ * FILE-NEXT:   000078 00000051
+ * FILE:        [[#%.6x,CODE]] 464c457f
+ * FILE-NEXT:   {{[0-9a-f]+}} 00010102
+ * FILE-NEXT:   {{[0-9a-f]+}} 00000000
+ * FILE-NEXT:   {{[0-9a-f]+}} 00000000
+ * FILE-NEXT:   {{[0-9a-f]+}} 00b70003
+ * FILE:        [[#%.6x,STEPS]] 00000003
+ * FILE-NEXT:   {{[0-9a-f]+}} 00000000
+ * FILE-NEXT:   {{[0-9a-f]+}} 00000000
+ * FILE-NEXT:   {{[0-9a-f]+}} 00000000
+ * FILE-NEXT:   {{[0-9a-f]+}} 00000100
+ * FILE-NEXT:   {{[0-9a-f]+}} 00000000
+ * FILE-NEXT:   {{[0-9a-f]+}} 00000030
+ * FILE-NEXT:   {{[0-9a-f]+}} 00000003
+ *
+ * A tool that cannot run stops the compile with its name.
+ * TOOL:        error: cannot run lcc-opt
  */
 
 static const signed char L1_W[18] = {
