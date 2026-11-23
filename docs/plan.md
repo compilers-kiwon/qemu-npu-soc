@@ -14,7 +14,7 @@
 | 마일스톤 | 목표 | 완료 조건 |
 |----------|------|-----------|
 | M1 | 합성곱 하나를 모든 층에 관통시킨다 | 컴파일한 합성곱 모델이 kn1-evb에서 TFLite Micro와 비트 단위로 같다(V1~V6) |
-| M2 | MNIST CNN | MNIST CNN 전체가 두 반올림 방식 모두에서 비트 단위로 같다 |
+| M2 | MNIST CNN | MNIST CNN이 kn1-evb에서 두 반올림 방식 모두 비트 단위로 같고(V6), 겹침이 있을 때와 없을 때의 사이클 추정을 보고하며, `kn1_defconfig`로 부팅한다 |
 | M3 | ResNet-8 | MLPerf Tiny ResNet-8이 64 KiB SRAM에서 비트 단위로 같고, SRAM 크기 비교 결과를 문서로 남긴다 |
 | M4 | 마무리 | 새로 받은 저장소에서 README의 절차만으로 빌드하고 데모를 돌릴 수 있다 |
 | 그 뒤 | PCIe, 실제 저장 장치 | 설계 D3과 13절 |
@@ -182,22 +182,171 @@ GitHub에서 한 번 성공한다.
 
 ## M2. MNIST CNN
 
-- 연산: AVGPOOL, 1x1 합성곱으로 처리하는 FC, `RESHAPE`, CPU에서 도는
-  softmax.
-- 생성기와 pragma: `FULLY_CONNECTED`, `AVERAGE_POOL_2D`, `RESHAPE`,
-  `SOFTMAX`를 C89로 쓰고, NPU 연산의 pragma 어휘를 더한다(설계 9.3절).
-- CPU 연산: softmax 같은 CPU 연산을 lcc-opt로 최적화해 aarch64 코드로
-  내린다(설계 13절 6번). lcc-opt를 받는 방법과 `model.knpu`의 CPU 섹션을
-  정해 구현한다.
-- FC를 1x1 합성곱으로 돌린 결과가 `FullyConnected`와 비트 단위로 같은지
-  확인한다(설계 13절 4번).
-- 컴파일러: 여러 층으로 된 그래프, 층 사이의 SRAM과 arena 배치, 사이클
-  추정(D31).
-- 커널 설정: kn1에 필요한 것만 남긴 `kn1_defconfig`(D35).
+설계 6.6절의 MNIST CNN(conv3x3(8)-avgpool-conv3x3(16)-avgpool-FC64-FC10-softmax)을
+모든 층에 관통시킨다. NPU에는 AVGPOOL과 1x1 합성곱으로 돌리는 FC를 더하고,
+NPU에서 돌지 않는 softmax는 같은 C89를 lcc-opt로 컴파일한 aarch64 코드로
+돌린다(D45). 여러 층의 스케줄(층 사이 활성값의 SRAM 상주, 다음 층 상수 미리
+읽기)과 사이클 추정(D31), 최소 커널 설정(D35)도 여기서 한다.
 
 완료 조건: MNIST CNN이 kn1-evb에서 두 반올림 방식 모두 TFLite Micro와 비트
-단위로 같다(V6). 이중 버퍼링이 있을 때와 없을 때의 사이클 추정을 보고한다.
-`kn1_defconfig`로 부팅한다.
+단위로 같다(V6). 겹침(이중 버퍼링)이 있을 때와 없을 때의 사이클 추정을
+보고한다. `kn1_defconfig`로 부팅한다.
+
+### M2.1 MNIST 모델과 정답값 (V2)
+
+- `models/mnist/make_model.py`: 설계 6.6절 구조(입력 28x28x1, conv3x3(8,
+  VALID, ReLU), avgpool 2x2, conv3x3(16, VALID, ReLU), avgpool 2x2, Flatten,
+  Dense 64(ReLU), Dense 10, Softmax)를 MNIST로 학습하고(고정 시드), 학습
+  이미지로 calibration해 int8로 변환한다(TensorFlow 2.21.0). 시험 집합에서
+  숫자마다 처음 나오는 이미지 하나씩을 모델 입력의 양자화로 바꿔 쓰고, float
+  모델과 int8 모델의 시험 집합 정확도를 찍는다. 손으로 돌리고 결과를
+  커밋한다(D12): `models/mnist/mnist.tflite`,
+  `models/mnist/digits/digit-{0..9}.bin`(CC BY-SA 3.0, 설계 12.4절).
+- V2: `tests/compiler/tflm_run.cc`가 `preserve_all_tensors`로 softmax의
+  입력(logits)도 쓴다.
+- `tests/compiler/test_mnist_model.py`: MNIST 시험의 틀. 시험 입력은 숫자
+  이미지 열 장과 무작위 셋, 전부 -128, 전부 127의 열다섯이다.
+
+완료 조건:
+
+- `mnist.tflite`의 연산이 `CONV_2D`, `AVERAGE_POOL_2D`, `CONV_2D`,
+  `AVERAGE_POOL_2D`, `RESHAPE`, `FULLY_CONNECTED` 둘, `SOFTMAX`이고, MAC 수와
+  파라미터 수가 설계 6.6절과 같다.
+- V2가 두 반올림 방식으로 시험 입력 열다섯의 최종 출력과 logits를 낸다. 두
+  방식의 최종 출력이 다른 입력이 하나 이상 있다.
+
+### M2.2 공유 코어의 `OP_AVGPOOL` (V1, V2, V3)
+
+- `hw/npu-core/`: `OP_AVGPOOL`(명세 6.4절, 8.4절). 모양, SRAM 범위, 겹침
+  검사와 동기화 규칙(명세 9절), 카운터(`PERF_OPS`에 1, `PERF_MACS`에 0).
+  QEMU 장치는 공유 코어를 쓰므로 따로 고치지 않고, 드라이버 검증기는 이미
+  `OP_AVGPOOL`을 받는다.
+- V2: `tests/npu-core`의 TFLite Micro 정답값에 int8 `AveragePool`을 더한다
+  (고정 커밋의 `pooling.h`).
+- V3: 어셈블러로 만든 명령열로 창 크기, stride, padding(VALID, SAME), clamp,
+  오류 코드(`BAD_PARAM`, `SRAM_RANGE`, `SYNC`)를 확인한다. `OP_AVGPOOL`이
+  `UNKNOWN_CMD`로 멈추기를 기대하던 경우는 고친다.
+- V1: kn1-npu qtest에 `OP_AVGPOOL` 한 경우와 `PERF_OPS`를 더한다.
+
+완료 조건: `OP_AVGPOOL`의 모든 경우가 V2와 비트 단위로 같고(두 반올림 빌드의
+정답값도 서로 같다), 오류 경우는 명세의 오류 코드와 `ERR_OFFSET`으로 멈춘다.
+V1이 통과한다.
+
+### M2.3 생성기 (V2)
+
+- `tflite2c`에 `AVERAGE_POOL_2D`, `RESHAPE`, `FULLY_CONNECTED`, `SOFTMAX`와
+  pragma `avgpool`, `fc`, `reshape`, `cpu`를 더한다(설계 9.2절, 9.3절). FC는
+  채널별·텐서 단위 곱셈 계수와 bias가 없는 경우를 받는다. softmax는 TFLite
+  Micro의 int8 `Softmax`와 고정소수점 함수를 C89로 옮기고, 매개변수를 반올림
+  방식마다 계산한다.
+- `--main` 파일이 logits도 쓴다. `--npu-only`는 CPU 층을 빼고 logits를 모델
+  출력으로 하는 C를 쓴다.
+
+완료 조건:
+
+- 생성기가 쓴 MNIST C를 `gcc -std=c89 -pedantic-errors`로 빌드해 시험 입력
+  열다섯을 돌린 최종 출력과 logits가 두 반올림 방식 모두 V2와 같다. softmax
+  이식의 비트 일치가 여기서 확인된다.
+- 같은 C를 gcc의 UBSan(`-fsanitize=undefined`)으로 돌려도 보고가 없다.
+- lcc가 MNIST C를 경고 없이 받는다(`-A -Wf-pragma=knpu`).
+- 합성곱 모델의 결과는 그대로다.
+
+### M2.4 컴파일러: NPU 경로 (V3, V4)
+
+- `knpu` 방언: 그래프 연산 `knpu.avgpool`, `knpu.cpu`, 명령 연산 `knpu.pool`,
+  CPU 단계 `knpu.cpu_step`(설계 9.4절).
+- `knpu-import`: `avgpool`, `fc`(1x1 `knpu.conv2d`), `reshape`, `cpu` 층과
+  흐름 검사. `knpu-tile`: avgpool의 출력 H 타일. `knpu-schedule`: 층 사이
+  활성값 SRAM 상주, 다음 층 상수 미리 읽기, CPU 단계, `overlap=false`.
+  `knpu-insert-waits`: `knpu.pool`.
+- 사이클 추정: `knpu-estimate`, `knpu-compile --report`와 `--overlap`(설계
+  9.1절의 가정값). `knpu-translate`: `OP_AVGPOOL`.
+- V4: 패스마다 lit 시험(새 연산과 오류 경로), 손으로 계산한 사이클 추정 사례,
+  새 pragma를 실제 lcc 출력으로 거치는 시험 하나.
+- V3: 생성기 `--npu-only`로 만든 MNIST 모델을 공유 코어에서 돌린다. CPU 층이
+  있는 모델의 컴파일은 M2.5에서 한다.
+
+완료 조건:
+
+- `--npu-only` MNIST 모델을 SRAM 64 KiB·32 KiB와 두 반올림 방식으로 컴파일해
+  공유 코어에서 돌린 logits가 시험 입력 열다섯 모두 V2와 비트 단위로 같다.
+  FC를 1x1 합성곱으로 돌린 결과의 비트 일치(설계 13절 4번)가 여기서
+  확인된다.
+- `--overlap=false`로 컴파일한 모델도 같은 logits를 내고, 추정 사이클은
+  겹침이 있을 때가 더 작다.
+- 대기 삽입을 끄고 컴파일하면 동기화 오류로 멈춘다.
+- `PERF_MACS`가 214,304이고, `PERF_DMA_*`와 `PERF_OPS`가 명령열에서 계산한
+  값과 같다.
+- 합성곱 모델의 V3(벡터 비교 포함)가 통과한다. 명령열이 바뀌면 벡터를 다시
+  만든다.
+
+### M2.5 컴파일러: CPU 경로 (V3, V4)
+
+- `docs/model-format.md`: 형식 minor 1(`CPU_CODE`, `CPU_STEPS`, 읽는 쪽이
+  검사할 것. 설계 9.5절).
+- `compiler/` CMake: lcc_llvm `v4.2-llvm.3`의 소스 압축(sha256)을 받아
+  `lcc-opt/`를 빌드하고, `mlir-translate`, `clang-23`, `ld.lld-23`을 찾는다.
+- `knpu-compile`: CPU 모듈(CPU 층 함수와 그 전역, external 연결, `knpu.*`
+  없음)을 bytecode로 써서 lcc-opt, `mlir-translate`, clang, ld.lld를 부르고
+  공유 객체를 `knpu.cpu_code`로 넣는다. `knpu-translate`: minor 1 섹션.
+- V4: CPU 모듈 나누기, 오류 경로(NPU 층 앞의 CPU 층 등), minor 1 섹션.
+- V3: 전체 MNIST 모델의 NPU 부분을 공유 코어에서 돌리고, 그 logits로 CPU
+  섹션을 qemu-aarch64 사용자 모드에서 돌린다. 시험 프로그램은 aarch64 교차
+  gcc로 빌드한 작은 C 프로그램이다(`dlopen`, `CPU_STEPS`대로 복사와 호출).
+- CI: `compiler` 작업에 `clang-23`, `lld-23`, `gcc-aarch64-linux-gnu`,
+  `libc6-dev-arm64-cross`, `qemu-user`를 더한다.
+
+완료 조건:
+
+- 전체 MNIST 모델(SRAM 64 KiB·32 KiB, 두 반올림 방식)의 최종 출력이 시험
+  입력 열다섯 모두 V2와 비트 단위로 같다(V3, qemu-aarch64).
+- 공유 객체는 `CPU_STEPS`가 가리키는 함수와 배열을 내보내고, 텍스트
+  재배치가 없다.
+- 같은 입력을 두 번 컴파일한 모델 파일이 바이트 단위로 같다.
+- push CI의 `compiler` 작업이 한 번 성공한다.
+
+### M2.6 런타임 (호스트 시험)
+
+- `libknpu`: 형식 minor 1의 파싱과 검사, `CPU_CODE`를 `memfd_create`로 만든
+  파일에서 `dlopen`, NPU 작업 뒤 `CPU_STEPS` 실행(설계 10절).
+- `knpu-infer`: 분류 벡터 출력의 `top1=`.
+- 호스트 시험: minor 1 파싱, 깨진 CPU 섹션 거부(ELF가 아님, 다른 기계, 끝나지
+  않는 이름, 범위를 벗어난 단계 등), `top1=` 출력.
+
+완료 조건: 런타임 호스트 시험이 push CI의 `runtime` 작업에서 통과한다. minor
+0 모델(합성곱 벡터)도 전처럼 읽는다.
+
+### M2.7 커널 설정 `kn1_defconfig` (부팅 시험, V5)
+
+- `br2-external/board/kn1-evb/kn1_defconfig`: `allnoconfig`에서 kn1에 필요한
+  것만 켠 `savedefconfig` 형태(설계 8.1절). GEM DMA 헬퍼와 `drm_sched`는
+  `CONFIG_DRM_ACCEL_ARM_ETHOSU=m`으로 켠다.
+- `kn1_evb_defconfig`가 `BR2_LINUX_KERNEL_USE_CUSTOM_CONFIG`로 이것을 쓴다.
+
+완료 조건: 이 설정으로 빌드한 커널에서 부팅 시험(M1.2의 확인 항목), V5,
+합성곱 모델의 V6이 통과하고 커널 경고가 없다.
+
+### M2.8 끝에서 끝까지 (V6)
+
+- 시험 벡터 `models/mnist/vectors/`: 모델 넷(반올림 double·single × SRAM
+  64 KiB·32 KiB), 입력 다섯(무작위 셋, 전부 -128, 전부 127. 숫자 이미지 열
+  장은 `models/mnist/digits/`), 시험 입력 열다섯의 정답값(두 방식). V3가
+  커밋본과 지금 생성물이 같은지 검사하고, `update-mnist-vectors`로 다시 쓴다.
+- `knpu-models`가 MNIST 벡터와 숫자 이미지를 `/usr/share/knpu/mnist/`에
+  넣는다.
+- V6: `kn1_defconfig` 커널로 부팅해 MNIST 모델 넷 × 입력 열다섯을 돌린다.
+  합성곱 시험은 그대로 둔다.
+- 사이클 추정 보고: MNIST를 SRAM 64 KiB·32 KiB에서 겹침을 켜고 끄고 컴파일한
+  추정치를 README에 표로 남긴다.
+- README: M2 절(새 연산, CPU 경로와 lcc-opt, 사이클 추정, `kn1_defconfig`),
+  현재 상태.
+
+완료 조건:
+
+- V6이 통과한다. 모든 모델과 입력이 정답값과 같고, `top1`이 정답값의
+  argmax와 같고, `PERF_MACS`가 214,304이며 다른 카운터가 모델에서 계산한
+  값과 같고, 커널 경고가 없다.
+- 야간 CI가 V6을 포함해 한 번 성공한다.
 
 ---
 
@@ -241,5 +390,6 @@ GitHub에서 한 번 성공한다.
 | 1. 실제 저장 장치 컨트롤러 | 그 뒤 |
 | 2. 비트 단위 NPU 명세 | M1.3 |
 | 3. 벤더 접두사 `kiwon`의 스키마 검사 | M1.2 |
-| 4. FC를 1x1 합성곱으로 돌린 결과의 비트 일치 | M2 |
-| 6. CPU 연산의 lcc-opt 경로 | M2 |
+| 4. FC를 1x1 합성곱으로 돌린 결과의 비트 일치 | M2.4 |
+| 5. 최소 `kn1_defconfig`의 GEM DMA 헬퍼와 `drm_sched` | M2.7 |
+| 6. CPU 연산의 lcc-opt 경로 | M2.5 |
