@@ -7,11 +7,10 @@
 #       built once per rounding mode, runs the .tflite model itself
 #   V3  test_conv_model.py: the tflite2c C on gcc, and lcc -> knpu-compile
 #       -> knpu_run (shared NPU core), both compared with V2
-#   V3  test_mnist_model.py: the MNIST CNN of M2 (so far its V2 outputs and
-#       logits, from TFLite Micro and from the tflite2c C on gcc, the NPU
-#       part through lcc -> knpu-compile -> knpu_run, and the whole model
-#       with its CPU steps on cpu_run under qemu-aarch64, docs/plan.md M2.1
-#       to M2.5)
+#   V3  test_mnist_model.py: the MNIST CNN of M2: its V2 outputs and logits
+#       from TFLite Micro and from the tflite2c C on gcc, the NPU part
+#       through lcc -> knpu-compile -> knpu_run, and the whole model with its
+#       CPU steps on cpu_run under qemu-aarch64
 #   V2  test_softmax.py: the tflite2c softmax on gcc against TFLite Micro,
 #       over input scales, betas and row lengths
 
@@ -119,7 +118,8 @@ set(MNIST_MODEL_TEST
   --cpu-run ${CPU_RUN}
   --qemu ${KNPU_QEMU_AARCH64}
   --qemu-ld-prefix ${KNPU_AARCH64_SYSROOT}
-  --work-dir ${CMAKE_CURRENT_BINARY_DIR}/work-mnist)
+  --work-dir ${CMAKE_CURRENT_BINARY_DIR}/work-mnist
+  --vectors ${KNPU_REPO_DIR}/models/mnist/vectors)
 
 add_test(NAME v3_mnist_model
          COMMAND Python3::Interpreter ${MNIST_MODEL_TEST})
@@ -134,3 +134,13 @@ add_test(NAME v2_softmax
                  --work-dir ${CMAKE_CURRENT_BINARY_DIR}/work-softmax)
 set_tests_properties(v3_mnist_model v2_softmax PROPERTIES
                      ENVIRONMENT PYTHONDONTWRITEBYTECODE=1)
+
+# Writes the V6 test vectors of the MNIST CNN (models/mnist/vectors/) from
+# this build; commit them when the output of the compiler or of the LLVM 23
+# tools changes (docs/design.md 12.2)
+add_custom_target(update-mnist-vectors
+  COMMAND ${CMAKE_COMMAND} -E env PYTHONDONTWRITEBYTECODE=1
+          ${Python3_EXECUTABLE} ${MNIST_MODEL_TEST} --update-vectors
+  DEPENDS knpu-compile knpu_run tflm_run_double tflm_run_single
+          cpu_run_aarch64
+  USES_TERMINAL)

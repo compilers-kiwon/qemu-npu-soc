@@ -93,9 +93,11 @@ compiler: $(PY_STAMP)
 check-compiler: compiler
 	ctest --test-dir '$(BUILD_DIR)/compiler' --output-on-failure
 
-# Writes models/conv/vectors/ again; commit them when they change
+# Writes models/conv/vectors/ and models/mnist/vectors/ again; commit them
+# when they change
 update-vectors: compiler
-	cmake --build '$(BUILD_DIR)/compiler' --target update-conv-vectors
+	cmake --build '$(BUILD_DIR)/compiler' --target update-conv-vectors \
+	      update-mnist-vectors
 
 # Rust 1.97.1: the cargo of the full build if there is one, else the
 # system's
@@ -113,5 +115,5 @@ help:
 	@echo 'Host tests (in $(BUILD_DIR)):'
 	@echo '  make check           check-npu-core, check-compiler and check-runtime'
 	@echo '  make compiler        build the compiler without testing it'
-	@echo '  make update-vectors  write models/conv/vectors/ again'
+	@echo '  make update-vectors  write models/*/vectors/ again'
 	@echo 'Variables: O=<Buildroot output directory>, MLIR_DIR=<MLIR CMake package>'

@@ -4,7 +4,9 @@
 config BR2_PACKAGE_KNPU_MODELS
 	bool "knpu-models"
 	help
-	  The test model of the kn1-npu compiled to model.knpu, with
-	  its inputs and expected outputs (/usr/share/knpu/conv/),
-	  from models/conv/vectors/ of this repository. V6 runs them
-	  with knpu-infer.
+	  The test models of the kn1-npu compiled to model.knpu, with
+	  their inputs and expected outputs, from models/ of this
+	  repository: the convolution test model in
+	  /usr/share/knpu/conv/, and the MNIST CNN with the MNIST
+	  digit images in /usr/share/knpu/mnist/. V6 runs them with
+	  knpu-infer.

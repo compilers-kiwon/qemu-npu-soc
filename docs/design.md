@@ -1006,6 +1006,12 @@ flatbuffers v25.9.23(C++ 소스). 생성기가 쓰는 PyPI `flatbuffers`도 25.9
 V3는 그것을 Ubuntu의 `gcc-aarch64-linux-gnu`, `libc6-dev-arm64-cross`,
 `qemu-user`로 돌린다.
 
+CPU 코드의 바이트는 apt.llvm.org LLVM 23 패키지(`mlir-23-tools`, `clang-23`,
+`lld-23`)의 판을 따른다(`ld.lld`는 판 번호를 `.comment`에 남긴다). push CI는
+실행 때마다 최신 23.x를 받는다. 판이 오르면 새로 컴파일한 MNIST 모델이
+커밋한 벡터(10절)와 달라 V3가 실패하므로, 로컬 도구를 같은 판으로 올리고
+`make update-vectors`로 벡터를 다시 만들어 커밋한다.
+
 ### 12.3 연결 패치
 
 연결 패치(glue patch)는 되도록 작게, 등록에 필요한 것만 둔다.
@@ -1034,7 +1040,11 @@ V3는 그것을 Ubuntu의 `gcc-aarch64-linux-gnu`, `libc6-dev-arm64-cross`,
 모델(Apache-2.0), TFLite `schema.fbs`와 빌드할 때 받는 TFLite Micro
 소스(Apache-2.0), flatbuffers(Apache-2.0), MNIST 시험
 이미지(`models/mnist/digits/`, CC BY-SA 3.0, 저작권자 Yann LeCun과 Corinna
-Cortes).
+Cortes). MNIST로 학습한 모델(`models/mnist/mnist.tflite`), 그것을 컴파일한
+모델 파일과 TFLite Micro로 낸 정답값(`models/mnist/vectors/`)도 MNIST의
+라이선스로 선언하고, 저작권자에 이 저장소의 저작자를 더한다. 같은 디렉터리의
+무작위·극단 입력은 MNIST에서 온 것이 아니므로 그 밖의 것과 같이 Apache-2.0
+WITH LLVM-exception이다.
 
 lcc는 저장소에 넣지 않고 빌드할 때 내려받는다(9.4절). lcc의
 라이선스(`CPYRIGHT`)는 그 파일과 함께 재배포하는 것은 허락하지만, lcc나

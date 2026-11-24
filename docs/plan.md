@@ -345,13 +345,22 @@ push CI의 `compiler` 작업에서 그대로 통과한다.
 
 ### M2.8 끝에서 끝까지 (V6)
 
-- 시험 벡터 `models/mnist/vectors/`: 모델 넷(반올림 double·single × SRAM
-  64 KiB·32 KiB), 입력 다섯(무작위 셋, 전부 -128, 전부 127. 숫자 이미지 열
-  장은 `models/mnist/digits/`), 시험 입력 열다섯의 정답값(두 방식). V3가
-  커밋본과 지금 생성물이 같은지 검사하고, `update-mnist-vectors`로 다시 쓴다.
+- 시험 벡터 `models/mnist/vectors/`: 모델 넷(CPU 코드까지 든 전체 모델,
+  반올림 double·single × SRAM 64 KiB·32 KiB), 입력 다섯(무작위 셋, 전부 -128,
+  전부 127. 숫자 이미지 열 장은 `models/mnist/digits/`), 시험 입력 열다섯의
+  정답값(두 방식). 파일 이름에는 V3의 입력 이름을 쓴다(`random-2.bin`,
+  `expected-double-digit-7.bin`). V3가 커밋본과 지금 생성물이 같은지 검사하고,
+  `make update-vectors`(CMake 대상 `update-mnist-vectors`)로 다시 쓴다.
+  LLVM 23의 판이 오르면 다시 만든다(설계 12.2절). 라이선스는 설계 12.4절대로
+  모델·정답값과 입력을 나눠 선언한다.
+- V3: 전체 모델의 `PERF_DMA_*`와 `PERF_OPS`도 명령열에서 계산한 값과
+  비교한다.
 - `knpu-models`가 MNIST 벡터와 숫자 이미지를 `/usr/share/knpu/mnist/`에
   넣는다.
 - V6: `kn1_defconfig` 커널로 부팅해 MNIST 모델 넷 × 입력 열다섯을 돌린다.
+  `top1`과 카운터의 기대값은 이 트리의 벡터에서 계산하므로, 먼저 게스트의
+  파일이 이 트리의 벡터·숫자 이미지와 같은지 `md5sum`으로 본다. 다른 반올림
+  방식의 정답값을 가려내는지 보고, 숫자 이미지 열 장의 `top1`을 찍는다.
   합성곱 시험은 그대로 둔다.
 - 사이클 추정 보고: MNIST를 SRAM 64 KiB·32 KiB에서 겹침을 켜고 끄고 컴파일한
   추정치를 README에 표로 남긴다.

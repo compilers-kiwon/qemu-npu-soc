@@ -28,7 +28,7 @@ MLIR로 컴파일해 이 NPU에서 돌리고, 결과를 TFLite Micro 참조 구�
 | `runtime/` | `libknpu`와 `knpu-infer`(Rust) |
 | `br2-external/` | Buildroot 외부 트리(defconfig, 커널 설정, 패키지, 패치) |
 | `buildroot/` | Buildroot 서브모듈(고정) |
-| `models/` | `.tflite` 모델, 학습·변환 스크립트 |
+| `models/` | `.tflite` 모델과 만드는 스크립트, 컴파일한 시험 벡터 |
 | `tests/` | 장치, 드라이버, 컴파일러, 끝-끝 시험 |
 
 ## 고정 버전
@@ -189,7 +189,8 @@ make test-v5
 C89로 옮기고, 층 정보는 층 함수 첫 줄의 `#pragma knpu`에 적는다. lcc가 이
 C를 MLIR로 내리면, `knpu-compile`이 MLIR 패스(가져오기, 타일링, 스케줄링,
 대기 명령 삽입)를 거쳐 `model.knpu`([형식](docs/model-format.md))를 쓴다.
-지금은 합성곱 층만 다룬다.
+NPU에서는 합성곱, 평균 풀링, FC(1x1 합성곱으로)를 돌리고, softmax처럼 NPU에서
+돌지 않는 층은 aarch64 코드로 만들어 모델 파일에 넣는다(아래 MNIST CNN 절).
 
 apt.llvm.org의 LLVM 23 패키지(`libmlir-23-dev`, `mlir-23-tools`,
 `llvm-23-dev`, `llvm-23-tools`, `clang-23`, `lld-23`), CMake, Ninja,
@@ -239,8 +240,9 @@ CI와 컴파일러에는 TensorFlow가 필요 없다.
 읽어 검사하고, 영역 버퍼와 명령열을 만들어 `knpu` 드라이버로 실행한다.
 `knpu-infer`는 모델 하나를 입력 하나로 돌려 성능 카운터를 찍고, 기대값과
 비교한다. 외부 크레이트는 쓰지 않는다. Buildroot가 `knpu-infer`를 `/usr/bin`에,
-시험 모델과 입력, 정답값(`models/conv/vectors/`)을 `/usr/share/knpu/conv/`에
-넣는다.
+시험 모델과 입력, 정답값을 `/usr/share/knpu/conv/`(합성곱,
+`models/conv/vectors/`)와 `/usr/share/knpu/mnist/`(MNIST CNN,
+`models/mnist/vectors/`와 숫자 이미지)에 넣는다.
 
 부팅한 kn1-evb에서 4 KiB SRAM용으로 컴파일한 모델(타일 5개)을 돌리면 다음과
 같다.
@@ -264,19 +266,100 @@ match=yes
 make check-runtime
 ```
 
-V6은 펌웨어 체인으로 부팅한 게스트에서 모델 넷(반올림 double·single × SRAM
-64 KiB·4 KiB)을 입력 다섯으로 돌려 TensorFlow Lite Micro의 출력과 비교하고,
-카운터와 잘린 모델의 거부를 확인한다.
+V6은 펌웨어 체인으로 부팅한 게스트에서 합성곱 모델 넷(반올림 double·single ×
+SRAM 64 KiB·4 KiB)을 입력 다섯으로, MNIST CNN 모델 넷(SRAM 64 KiB·32 KiB)을
+입력 열다섯으로 돌려 TensorFlow Lite Micro의 출력과 비교하고, `top1`, 카운터,
+잘린 모델의 거부를 확인한다. MNIST의 기대값은 저장소의 벡터에서 계산하므로,
+먼저 이미지에 든 파일이 저장소의 것과 같은지 본다.
 
 ```bash
 make test-v6
 ```
 
-컴파일러 출력이 바뀌면 시험 벡터를 다시 만들어 커밋한다. 커밋본이 다르면
-V3(`ctest`)가 실패한다.
+컴파일러 출력이 바뀌면 시험 벡터(`models/*/vectors/`)를 다시 만들어 커밋한다.
+커밋본이 다르면 V3(`ctest`)가 실패한다. MNIST 모델의 CPU 코드는 LLVM 23 도구의
+판에 따라 바이트가 달라지므로(`ld.lld`가 판 번호를 남긴다), apt.llvm.org의
+판이 오를 때도 다시 만든다(설계 12.2절). 새 벡터를 이미지에 넣으려면
+`knpu-models` 패키지와 이미지를 다시 만든다.
 
 ```bash
 make update-vectors
+make br-knpu-models-rebuild all
+```
+
+## MNIST CNN
+
+M2는 MNIST 손글씨 숫자 분류 CNN(설계 6.6절)을 모든 층에 관통시킨다.
+`models/mnist/make_model.py`가 TensorFlow 2.21.0으로 MNIST를 학습해 int8로
+바꾼 `models/mnist/mnist.tflite`는 입력이 28x28x1이고 층은
+conv3x3(8)-avgpool-conv3x3(16)-avgpool-FC64-FC10-softmax이며, MAC 214,304개와
+파라미터 27,562개다. `models/mnist/digits/`의 숫자 이미지 열 장은 MNIST 시험
+집합에서 숫자마다 처음 나오는 이미지다.
+
+- NPU: 공유 코어에 평균 풀링(`OP_AVGPOOL`)을 더했고, FC는 1x1 합성곱으로
+  돌린다. 모든 층이 타일 하나에 들어가므로 겹침은 층 사이에서 생긴다.
+  컴파일러는 층 사이 활성값을 SRAM에 남기고, 다음 층의 상수를 앞 층을
+  계산하는 동안 미리 읽는다.
+- CPU: softmax는 생성기가 TFLite Micro의 int8 Softmax를 옮긴 C89 함수다.
+  `knpu-compile`이 이 함수를 lcc_llvm의 lcc-opt(affine·linalg로 올려
+  최적화)와 LLVM 23의 `mlir-translate`, clang, `ld.lld`로 aarch64 공유 객체로
+  만들어 `model.knpu`의 CPU 섹션(형식 minor 1)에 넣는다. 런타임은 이 코드를
+  `memfd_create`와 `dlopen`으로 올려 두고 NPU 작업 뒤 실행하므로,
+  `knpu-infer`로는 실행 파일처럼 믿을 수 있는 모델 파일만 돌린다.
+- 커널: `kn1_defconfig`(설계 8.1절)로 빌드한 커널에서 돈다.
+- 검증: 두 반올림 방식 모두 시험 입력 열다섯(숫자 이미지 열 장, 무작위 셋,
+  전부 -128, 전부 127)의 출력이 TFLite Micro와 비트 단위로 같다. 생성기의 C를
+  gcc로 돌리고(V2), 컴파일한 모델의 NPU 부분을 공유 코어에서, CPU 부분을
+  qemu-aarch64에서 돌리고(V3), kn1-evb에서 `knpu-infer`로 돌린다(V6). 숫자
+  이미지 열 장은 모두 제 숫자로 분류된다.
+
+부팅한 kn1-evb에서 32 KiB SRAM용으로 컴파일한 모델에 숫자 7 이미지를 넣으면
+다음과 같다. `cpu_steps=3`은 NPU 작업 뒤 CPU가 하는 단계(logits 복사, softmax
+호출, 출력 복사)이고, `dma_wr_bytes=10`은 층 사이 활성값이 SRAM에 남아 NPU가
+logits 10바이트만 쓴다는 뜻이다.
+
+```
+# modprobe knpu
+# cd /usr/share/knpu/mnist
+# knpu-infer mnist-double-32k.knpu digit-7.bin --expect expected-double-digit-7.bin
+model=mnist-double-32k.knpu format=0.1 sram_size=32768 command_bytes=556 model_ops=12 cpu_steps=3
+input_shape=1x28x28x1 input_scale=0.003921569 input_zero_point=-128 output_shape=1x1x1x10 output_scale=0.00390625 output_zero_point=-128
+device=/dev/accel/accel0 npu=0.0 device_sram_size=65536
+macs=214304 dma_rd_bytes=29440 dma_wr_bytes=10 ops=12
+top1=7
+match=yes
+```
+
+### 사이클 추정
+
+장치는 시간을 모델링하지 않으므로(설계 D1), 컴파일러가 대기 명령까지 들어간
+명령열을 명세 9절의 큐 모델로 따라가 사이클을 추정한다. 가정값은 사이클당 MAC
+256개, DMA 16바이트, 풀링 창 원소 256개이고, 실제 칩의 값이 아니라 스케줄을
+비교하려는 값이다(설계 9.1절). MNIST CNN의 추정치는 다음과 같고, 두 반올림
+방식이 같다.
+
+| SRAM | 겹침 있음 | 겹침 없음(`--overlap=false`) |
+|------|-----------|------------------------------|
+| 64 KiB | 1,896 | 3,855 |
+| 32 KiB | 2,025 | 3,855 |
+
+겹침이 있으면 층 사이 활성값이 SRAM에 남아 DMA는 입력과 상수를 읽고 logits
+10바이트만 쓰며, 다음 층의 상수를 미리 읽는다. 가장 긴 작업은 FC 400->64의
+상수 26,368바이트를 읽는 DMA(1,648사이클)인데, 이 DMA가 64 KiB에서는
+144사이클에, 32 KiB에서는 273사이클에 시작해 그 차이만큼 끝이 늦다. 겹침이
+없으면 층마다 입력과 상수를 읽고 출력을 DRAM에 쓴 뒤 다음 층으로 가므로,
+모든 층이 타일 하나에 들어가는 이 모델에서는 SRAM 크기와 관계없다.
+
+층별 보고는 `--report`가 찍는다. 합성곱 모델과 같은 순서로 컴파일하고,
+`--overlap=false`를 더하면 겹침 없는 스케줄의 보고가 나온다.
+
+```bash
+L=build/compiler/deps/lcc-v4.2-llvm.3-mlir-aarch64-linux
+build/py-venv/bin/python3 compiler/tflite2c/tflite2c.py \
+    --schema build/compiler/deps/schema_py_generated.py --round double \
+    models/mnist/mnist.tflite -o mnist.c
+LCCDIR=$L $L/lcc -Wf-pragma=knpu -S mnist.c -o mnist.mlir
+build/compiler/bin/knpu-compile --sram-size=32768 --report mnist.mlir -o mnist.knpu
 ```
 
 ## CI
@@ -292,7 +375,7 @@ NPU 공유 코어 시험(V2, V3), 모델 컴파일러 시험(V2~V4), 런타임 �
 | 마일스톤 | 목표 | 상태 |
 |----------|------|------|
 | M1 | 합성곱 하나를 모든 층에 관통시킨다 | 끝났다. M1.1 저장소 뼈대, M1.2 펌웨어 체인 부팅(QEMU 머신, 디바이스 트리, TF-A, U-Boot, 리눅스 셸), M1.3 NPU 명세 v0([docs/npu-spec.md](docs/npu-spec.md)), M1.4 NPU 공유 코어와 정답값 비교(V2, V3), M1.5 QEMU NPU 장치(V1), M1.6 `knpu` 드라이버(V5), M1.7 모델 컴파일러 최소 경로(V2~V4), M1.8 런타임과 끝-끝 시험(V6) |
-| M2 | MNIST CNN | 시작 전 |
+| M2 | MNIST CNN | 끝났다. M2.1 MNIST 모델과 정답값(V2), M2.2 공유 코어의 `OP_AVGPOOL`(V1~V3), M2.3 생성기의 새 연산과 softmax(V2), M2.4 컴파일러 NPU 경로와 사이클 추정(V3, V4), M2.5 컴파일러 CPU 경로와 lcc-opt(V3, V4), M2.6 런타임의 CPU 단계와 top-1, M2.7 커널 설정 `kn1_defconfig`, M2.8 끝-끝 시험(V6)과 사이클 추정 보고 |
 | M3 | MLPerf Tiny ResNet-8 | 시작 전 |
 | M4 | 마무리: 새로 받은 저장소에서 README만으로 빌드와 데모 | 시작 전 |
 

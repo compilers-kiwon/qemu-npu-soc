@@ -3,8 +3,8 @@
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 """V2 and V3 of the MNIST CNN of M2 (docs/plan.md M2.1 to M2.8).
 
-So far (M2.1 to M2.5) the model, its references, the generator and the
-compiled model:
+The model, its references, the generator, the compiled model and the test
+vectors of V6:
 
 1. models/mnist/mnist.tflite has the operators of docs/design.md 6.6 and
    its nominal MACs and parameters.
@@ -36,10 +36,14 @@ compiled model:
    SRAM sizes. Two compiles give the same bytes; the shared object exports
    the functions and arrays of the CPU steps, binds its own symbols
    (DF_SYMBOLIC) and has no text relocations.
-   knpu_run runs the NPU part, which leaves V2's logits in the arena, and
-   cpu_run, an aarch64 program on qemu-aarch64 user mode, loads the CPU
-   code as the runtime does and runs the CPU steps on that arena: the
-   output must equal V2's.
+   knpu_run runs the NPU part, which leaves V2's logits in the arena with
+   the counters that the command stream implies, and cpu_run, an aarch64
+   program on qemu-aarch64 user mode, loads the CPU code as the runtime does
+   and runs the CPU steps on that arena: the output must equal V2's.
+9. With --vectors, the committed test vectors of V6 (models/mnist/vectors/:
+   these four models, the inputs other than the digit images, and the V2
+   outputs of all fifteen inputs in both rounding modes) must equal what
+   this run makes; --update-vectors writes them instead.
 
 Inputs: the ten digit images (models/mnist/digits/), three random inputs,
 all -128 and all 127. The random inputs come from a seeded stream: the
@@ -60,7 +64,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import model_file  # noqa: E402
-from test_conv_model import ERR_SYNC, run_npu  # noqa: E402
+from test_conv_model import ERR_SYNC, check_vectors, run_npu  # noqa: E402
 
 SEED = 20261123
 SEARCH_LIMIT = 200   # random inputs tried for one that tells the modes apart
@@ -226,7 +230,12 @@ def main():
                 "knpu-compile", "knpu-run", "tflm-double", "tflm-single",
                 "cpu-run", "qemu", "qemu-ld-prefix", "work-dir"):
         ap.add_argument(f"--{opt}", required=True)
+    ap.add_argument("--vectors", help="directory of the V6 test vectors")
+    ap.add_argument("--update-vectors", action="store_true",
+                    help="write the test vectors instead of comparing")
     args = ap.parse_args()
+    if args.update_vectors and not args.vectors:
+        ap.error("--update-vectors needs --vectors")
     work = args.work_dir
     os.makedirs(work, exist_ok=True)
     c = Checker()
@@ -270,12 +279,16 @@ def main():
     print(f"random-2 is input {i} of the seeded stream")
     names += ["random-2", "all-min", "all-max"]
     inputs += [candidate, bytes([0x80]) * IN_BYTES, bytes([0x7F]) * IN_BYTES]
+    # The digit images are installed from models/mnist/digits/ as they are
+    vectors = {f"{n}.bin": inp for n, inp in zip(names, inputs)
+               if not n.startswith("digit-")}
 
     # V2: final outputs and logits in both rounding modes
     golden = {}
     for mode in ("double", "single"):
         for n, inp in zip(names, inputs):
             golden[mode, n] = tflm(mode, n, inp)
+            vectors[f"expected-{mode}-{n}.bin"] = golden[mode, n][0]
             c.check(len(golden[mode, n][0]) == CLASSES,
                     f"{mode} {n}: TFLM output size")
             c.check(len(golden[mode, n][1]) == CLASSES,
@@ -393,7 +406,9 @@ def main():
             data = read(knpu)
             c.check(read(again) == data,
                     f"{tag}: two compiles of the same input differ")
+            vectors[f"mnist-{mode}-{size_name}.knpu"] = data
             model = model_file.read(data)
+            counters = stream_counters(model)
             c.check(model.format_minor == 1 and model.cpu_code is not None,
                     f"{tag}: no CPU sections")
             exports, textrel, symbolic = elf_exports(model.cpu_code)
@@ -413,6 +428,9 @@ def main():
                 c.check(result["err_code"] == 0 and result["macs"] == MACS,
                         f"{tag} {n}: err_code {result['err_code']:#x}, "
                         f"PERF_MACS {result['macs']}")
+                c.check((result["dma_rd_bytes"], result["dma_wr_bytes"],
+                         result["ops"]) == counters,
+                        f"{tag} {n}: counters differ from the stream")
                 if arena is None:
                     continue
                 c.check(arena[logits.offset:logits.offset + logits.size]
@@ -432,6 +450,8 @@ def main():
                             == golden[mode, n][0],
                             f"{tag} {n}: output differs from V2")
 
+    if args.vectors:
+        check_vectors(c, args.vectors, vectors, args.update_vectors)
     print(f"{c.passes} passed, {c.failures} failed")
     sys.exit(1 if c.failures else 0)
 
