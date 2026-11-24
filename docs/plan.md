@@ -418,8 +418,9 @@ Micro와 비트 단위로 같다(V6). SRAM 크기 시연 결과를 문서로 남
 완료 조건:
 
 - `resnet8.tflite`의 연산이 `CONV_2D` 아홉, `ADD` 셋, `AVERAGE_POOL_2D`,
-  `RESHAPE`, `FULLY_CONNECTED`, `SOFTMAX`이고, MAC 수와 파라미터 수가 설계
-  6.6절과 같다.
+  `FULLY_CONNECTED`, `SOFTMAX`이고, MAC 수와 파라미터 수가 설계 6.6절과 같다.
+  TF 2.21.0의 변환기는 Flatten을 `RESHAPE`로 남기지 않고, FC가 avgpool의
+  1x1x104 출력을 바로 읽게 한다.
 - V2가 두 반올림 방식으로 시험 입력 열다섯의 최종 출력과 logits를 낸다. 두
   방식의 최종 출력이 다른 입력이 하나 이상 있다.
 - `reuse lint`가 통과한다(모델은 저장소 라이선스, 사진은 CC0-1.0).

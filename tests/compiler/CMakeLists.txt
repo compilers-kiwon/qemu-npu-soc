@@ -11,6 +11,8 @@
 #       from TFLite Micro and from the tflite2c C on gcc, the NPU part
 #       through lcc -> knpu-compile -> knpu_run, and the whole model with its
 #       CPU steps on cpu_run under qemu-aarch64
+#   V3  test_resnet8_model.py: the ResNet-8 of M3 (so far its V2 outputs
+#       and logits, docs/plan.md M3.1)
 #   V2  test_softmax.py: the tflite2c softmax on gcc against TFLite Micro,
 #       over input scales, betas and row lengths
 
@@ -144,3 +146,17 @@ add_custom_target(update-mnist-vectors
   DEPENDS knpu-compile knpu_run tflm_run_double tflm_run_single
           cpu_run_aarch64
   USES_TERMINAL)
+
+set(RESNET8_MODEL_TEST
+  ${CMAKE_CURRENT_SOURCE_DIR}/test_resnet8_model.py
+  --model ${KNPU_REPO_DIR}/models/resnet8/resnet8.tflite
+  --photos ${KNPU_REPO_DIR}/models/resnet8/photos
+  --schema ${KNPU_TFLITE_SCHEMA}
+  --tflm-double $<TARGET_FILE:tflm_run_double>
+  --tflm-single $<TARGET_FILE:tflm_run_single>
+  --work-dir ${CMAKE_CURRENT_BINARY_DIR}/work-resnet8)
+
+add_test(NAME v3_resnet8_model
+         COMMAND Python3::Interpreter ${RESNET8_MODEL_TEST})
+set_tests_properties(v3_resnet8_model PROPERTIES
+                     ENVIRONMENT PYTHONDONTWRITEBYTECODE=1)
