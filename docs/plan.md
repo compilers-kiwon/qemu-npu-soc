@@ -378,14 +378,163 @@ push CI의 `compiler` 작업에서 그대로 통과한다.
 
 ## M3. ResNet-8
 
-- 연산: ADD(입력 스케일링 포함), stride 2 합성곱, 잔차 연결.
-- 64 KiB에 들어가지 않는 층의 타일링: H 타일과 출력 채널 타일, 2-D DMA,
-  arena로 내보내기.
-- SRAM 크기 시연: 같은 모델을 32, 64, 128 KiB로 컴파일해 `PERF_DMA_*`와
-  사이클 추정을 비교한다(설계 6.6절).
+설계 6.6절의 ResNet-8(MLPerf Tiny 학습 스크립트의 구조, 필터 26개)을 모든 층에
+관통시킨다. NPU에는 ADD(입력 스케일링 포함)를 더하고, 컴파일러는 잔차
+연결(사슬이 아닌 층 그래프, 입력이 둘인 층)과 64 KiB에 들어가지 않는 층의
+타일링(출력 H 타일과 출력 채널 타일, 2-D DMA, arena로 내보내기)을 다룬다.
+stride 2 합성곱과 2-D DMA는 공유 코어에 이미 있다. 같은 모델을 32, 64,
+128 KiB로 컴파일해 `PERF_DMA_*`와 사이클 추정을 비교한다(설계 6.6절).
 
-완료 조건: MLPerf Tiny ResNet-8이 kn1-evb에서 TFLite Micro와 비트 단위로
-같다(V6). SRAM 크기 시연 결과를 문서로 남긴다.
+완료 조건: MLPerf Tiny ResNet-8이 kn1-evb에서 두 반올림 방식 모두 TFLite
+Micro와 비트 단위로 같다(V6). SRAM 크기 시연 결과를 문서로 남긴다.
+
+### M3.1 ResNet-8 모델과 정답값 (V2)
+
+- `models/resnet8/make_model.py`: MLPerf Tiny `keras_model.py`의
+  `resnet_v1_eembc(conv_filters=26)`와 같은 층(입력 32x32x3, 합성곱 아홉, 잔차
+  덧셈 셋, avgpool 8x8, FC 10, softmax, L2 1e-4)을 이 저장소의 코드로
+  쓰고(업스트림 코드를 복사하지 않는다), CIFAR-10으로 학습해 int8로 바꾼다.
+  학습은 업스트림 `train.py`의 방법을 따른다: 배치 32, Adam(학습률 0.001,
+  epoch마다 × 0.99), 500 epoch, 회전 15도·이동 0.1·좌우 뒤집기 증강(Keras 3의
+  `RandomRotation(15/360)`, `RandomTranslation(0.1, 0.1)`,
+  `RandomFlip("horizontal")`), 픽셀 0~255를 그대로 입력. TensorFlow 2.21.0,
+  고정 시드, `enable_op_determinism()`으로 CPU에서 돌린다. Keras가 CIFAR-10을
+  받으며 SHA-256을 확인한다. 변환은 int8 입출력이고, 보정 이미지는 MNIST처럼
+  학습 집합에서 고른다. 시험 집합 10,000장의 float, int8 정확도를 찍는다.
+  손으로 돌리고 결과 `models/resnet8/resnet8.tflite`를 커밋한다(D12, 설계
+  12.4절).
+- `models/resnet8/make_photos.py`: CIFAR-10의 클래스마다 Wikimedia Commons의
+  CC0-1.0 사진 한 장(물체가 가운데 있고 하나인 것)을 받아 정사각형으로 자르고
+  32x32로 줄인 뒤, 모델 입력의 양자화로 바꾼 int8 바이트(3,072 B)를
+  `models/resnet8/photos/photo-<클래스>.bin`에 쓴다. 사진마다 URL, 저작자,
+  라이선스, 내려받은 원본의 sha256을 스크립트에 적고, 자르고 줄이는
+  방법(필터)을 고정한다. 사진은 모델의 분류 결과를 보기 전에 정하고, 틀리게
+  분류돼도 바꾸지 않는다. 손으로 돌리고 결과를 커밋한다(CC0-1.0,
+  `LICENSES/CC0-1.0.txt`).
+- `tests/compiler/test_resnet8_model.py`: ResNet-8 시험의 틀. 시험 입력은 사진
+  열 장과 무작위 셋, 전부 -128, 전부 127의 열다섯이다. V2(`tflm_run`)가 두
+  반올림 방식으로 최종 출력과 logits를 낸다.
+
+완료 조건:
+
+- `resnet8.tflite`의 연산이 `CONV_2D` 아홉, `ADD` 셋, `AVERAGE_POOL_2D`,
+  `RESHAPE`, `FULLY_CONNECTED`, `SOFTMAX`이고, MAC 수와 파라미터 수가 설계
+  6.6절과 같다.
+- V2가 두 반올림 방식으로 시험 입력 열다섯의 최종 출력과 logits를 낸다. 두
+  방식의 최종 출력이 다른 입력이 하나 이상 있다.
+- `reuse lint`가 통과한다(모델은 저장소 라이선스, 사진은 CC0-1.0).
+
+### M3.2 공유 코어의 `OP_ADD` (V1, V2, V3)
+
+- `hw/npu-core/`: `OP_ADD`와 그것만 쓰는 SET(`SET_IFM2_BASE`, `SET_IFM2_ZP`,
+  `SET_IFM_SCALE`, `SET_IFM2_SCALE`, `SET_OFM_SCALE`. 명세 6.1, 6.4, 8.3절).
+  모양, SRAM 범위(IFM, IFM2, OFM), 겹침(제자리 덧셈은 허용) 검사와 동기화
+  규칙(명세 9절), 카운터(`PERF_OPS`에 1, `PERF_MACS`에 0). QEMU 장치는 공유
+  코어를 쓰므로 따로 고치지 않고, 드라이버 검증기는 이미 `OP_ADD`를 받는다.
+- V2: `tests/npu-core`의 TFLite Micro 정답값에 int8 `Add`를 더한다(고정 커밋의
+  `add.h`).
+- V3: 어셈블러로 만든 명령열로 여러 스케일과 영점, clamp, 제자리 덧셈, 두
+  반올림 방식, 오류 코드(`BAD_PARAM`, `SRAM_RANGE`, `SYNC`)를 확인한다.
+  `OP_ADD`와 그 SET이 `UNKNOWN_CMD`로 멈추기를 기대하던 경우는 고친다.
+- V1: kn1-npu qtest에 `OP_ADD` 한 경우와 `PERF_OPS`를 더한다.
+
+완료 조건: `OP_ADD`의 모든 경우가 두 반올림 방식 모두 V2와 비트 단위로
+같고(TFLite Micro ADD의 반올림이 명세 8.3절과 같다는 것이 여기서 확인된다),
+오류 경우는 명세의 오류 코드와 `ERR_OFFSET`으로 멈춘다. V1이 통과한다.
+
+### M3.3 생성기 (V2)
+
+- `tflite2c`에 `ADD`와 pragma `add`를 더한다(설계 9.2절, 9.3절). 매개변수는
+  TFLite Micro의 int8 식(`add_common.cc`)대로 구하고, ReLU는 clamp로 쓴다.
+  본문은 `AddFunc`(`add.h`)와 같은 C89 루프다.
+- 층이 사슬이어야 한다는 검사를 "층은 앞에서 쓴 배열을 읽는다"로 바꾼다. 배열
+  이름(`act0`, `actN`)은 그대로이므로 합성곱·MNIST 모델의 C는 바뀌지 않는다.
+- `tests/compiler/test_resnet8_model.py`: 생성기가 쓴 C를 gcc로 돌린 결과를
+  V2와 비교한다.
+
+완료 조건:
+
+- 생성기가 쓴 ResNet-8 C를 `gcc -std=c89 -pedantic-errors`로 빌드해 시험 입력
+  열다섯을 돌린 최종 출력과 logits가 두 반올림 방식 모두 V2와 같다.
+- 같은 C를 gcc의 UBSan(`-fsanitize=undefined`)으로 돌려도 보고가 없다.
+- lcc가 ResNet-8 C를 경고 없이 받는다(`-A -Wf-pragma=knpu`).
+- 합성곱·MNIST 모델의 결과는 그대로다.
+
+### M3.4 컴파일러: ADD와 두 입력 층 (V3, V4)
+
+- `knpu` 방언: 그래프 연산 `knpu.add`, 명령 연산 `knpu.elementwise`(설계
+  9.4절).
+- `knpu-import`: `add` 층과 그 검사(두 입력과 출력의 모양, 영점).
+  `knpu-schedule`: 입력이 둘인 층. 잔차의 텐서는 지금의 수명 배치로 SRAM에
+  남거나 arena를 거치고, 제자리 덧셈은 쓰지 않는다. `knpu-insert-waits`:
+  `knpu.elementwise`의 SRAM 범위 셋.
+- 사이클 추정: `knpu-estimate`의 ADD 길이(옵션 `add-elements-per-cycle`, 기본
+  256)와 `knpu-compile`의 같은 옵션. `knpu-translate`: `OP_ADD`와 그 SET.
+- V4: 패스마다 새 연산과 오류 경로의 lit 시험, `OP_ADD` 인코딩, 손으로 계산한
+  ADD의 추정 사례, `add` pragma를 실제 lcc 출력으로 거치는 시험.
+- V3: SRAM 128 KiB(모든 층이 타일 하나)로 컴파일한 ResNet-8의 NPU 부분을 공유
+  코어에서, CPU 부분을 qemu-aarch64에서 돌린다. 공유 코어가 ResNet-8 작업
+  하나를 도는 시간을 재서 QEMU 메인 루프를 얼마나 멈추는지 본다(D32).
+
+완료 조건:
+
+- SRAM 128 KiB, 두 반올림 방식으로 컴파일한 ResNet-8의 최종 출력이 시험 입력
+  열다섯 모두 V2와 비트 단위로 같다. `--overlap=false`로 컴파일한 모델도 같고,
+  대기 삽입을 끄면 동기화 오류로 멈춘다.
+- `PERF_MACS`가 32,562,192이고, `PERF_DMA_*`와 `PERF_OPS`가 명령열에서 계산한
+  값과 같다.
+- 합성곱·MNIST 모델의 V3(벡터 비교 포함)가 그대로 통과한다.
+
+### M3.5 컴파일러: 출력 채널 타일과 2-D DMA (V3, V4)
+
+- `knpu-tile`: 한 행 타일로도 들어가지 않는 합성곱과 FC의 출력 채널
+  타일(필요하면 출력 H 타일과 겹쳐 씀), ADD의 출력 H 타일(설계 9.4절).
+- `knpu-schedule`: 채널 구간이 있는 타일. 채널 타일들이 SRAM의 같은 입력을
+  읽고, 다음 타일의 상수를 미리 읽으며, 출력은 2-D DMA(행 길이 n, 횟수 H·W,
+  DRAM 쪽 간격 C)로 arena에 쓴다.
+- V4: 출력 채널 타일, ADD의 H 타일, 2-D 저장의 lit 시험.
+- V3: SRAM 64 KiB(출력 H 타일 두 층, 출력 채널 타일 한 층)와 32 KiB(출력 H
+  타일 일곱 층, 출력 채널 타일 두 층)로 컴파일한 ResNet-8.
+
+완료 조건:
+
+- SRAM 64 KiB·32 KiB, 두 반올림 방식, 겹침이 있을 때와 없을 때로 컴파일한
+  ResNet-8의 최종 출력이 시험 입력 열다섯 모두 V2와 비트 단위로 같고, 카운터가
+  명령열에서 계산한 값과 같다.
+- 합성곱·MNIST 모델의 V3가 그대로 통과한다. 명령열이 바뀌면 벡터를 다시
+  만든다.
+
+### M3.6 SRAM 크기 시연과 사이클 추정 보고
+
+- ResNet-8을 SRAM 32, 64, 128 KiB에서 겹침을 켜고 끄고 컴파일해,
+  `knpu-compile --report`의 추정 사이클과 V3의 `PERF_DMA_RD_BYTES`,
+  `PERF_DMA_WR_BYTES`, `PERF_OPS`를 README의 ResNet-8 절에 표로 남긴다. 어느
+  층을 어떻게 나눴고 어느 활성값이 SRAM에 남았는지, `make_model.py`가 찍은
+  시험 집합 정확도(float, int8)도 적는다.
+
+완료 조건: README의 표가 `--report`와 V3에서 나온 값과 같다.
+
+### M3.7 끝에서 끝까지 (V6)
+
+- 시험 벡터 `models/resnet8/vectors/`: 모델 넷(반올림 double·single × SRAM
+  64 KiB·32 KiB), 입력 다섯(무작위 셋, 전부 -128, 전부 127. 사진 열 장은
+  `models/resnet8/photos/`), 시험 입력 열다섯의 정답값(두 방식). V3가 커밋본과
+  지금 생성물이 같은지 검사하고, `make update-vectors`(CMake 대상
+  `update-resnet8-vectors`)로 다시 쓴다. 라이선스는 설계 12.4절대로 선언한다.
+- `knpu-models`가 ResNet-8 벡터와 사진을 `/usr/share/knpu/resnet8/`에 넣는다.
+- V6: 64 KiB 장치에서 ResNet-8 모델 넷 × 입력 열다섯을 돌린다(128 KiB 모델은
+  V3에서만 돈다). 먼저 게스트의 파일이 이 트리의 벡터·사진과 같은지
+  `md5sum`으로 보고, 다른 반올림 방식의 정답값을 가려내는지 보고, 사진 열 장의
+  `top1`을 찍는다. 합성곱·MNIST 시험은 그대로 둔다.
+- README: M3 절(ADD와 잔차, 타일링, 사진의 분류 결과), 구성 표, 런타임 절,
+  현재 상태.
+
+완료 조건:
+
+- V6이 통과한다. 모든 모델과 입력이 정답값과 같고, `top1`이 정답값의 argmax와
+  같고, `PERF_MACS`가 32,562,192이며 다른 카운터가 모델에서 계산한 값과 같고,
+  커널 경고가 없다.
+- 야간 CI가 V6을 포함해 한 번 성공한다.
 
 ---
 

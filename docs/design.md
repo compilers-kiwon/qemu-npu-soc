@@ -46,7 +46,7 @@ QEMU ARMv8 `virt` 보드 위에 SystemC 가속기 모델, 리눅스 드라이버
 | D2 | NPU 연결 | SoC 버스의 MMIO 플랫폼 장치로 두고, 디바이스 트리에 기술하며, 인터럽트는 GIC SPI로 낸다. | 메인라인의 Arm SoC NPU가 이렇게 연결된다(`drivers/accel/ethosu`, `drivers/accel/rocket`). "새 SoC에 커널을 올린다"는 목표와 맞는다. |
 | D3 | PCIe | 범용 ECAM 호스트 브리지(QEMU `TYPE_GPEX_HOST`, 리눅스 `pci-host-ecam-generic`). 주소 창은 지금 예약하고, 브리지는 첫 끝-끝 데모 뒤에 넣는다. MSI는 GICv3 ITS를 거친다. | 첫 경로에 필요 없고 NPU 설계에 영향을 주지 않는다. |
 | D4 | 디바이스 트리 | 손으로 쓴 SoC `.dtsi`, 보드 `.dts`, NPU 바인딩 YAML. U-Boot는 보드 `.dts`로 자기 제어용 DT를 빌드하고, 리눅스는 extlinux를 거쳐 `/boot`에서 DTB를 읽는다. QEMU는 펌웨어 없이 커널을 바로 띄울 때만 DTB(`-dtb`)를 올린다. | SoC 벤더가 만드는 것과 같은 산출물이다(예: `rk3588-base.dtsi`, `rockchip,rk3588-rknn-core.yaml`). 자체 DT는 U-Boot의 기본 방식(`OF_SEPARATE`)이고, 앞 단계에서 DT를 받는 Arm 플랫폼은 9개뿐이다(`arch/arm/Kconfig`의 `OF_HAS_PRIOR_STAGE`). |
-| D5 | 데모 모델 | 처음 완성할 모델은 작은 MNIST CNN이고, 최종 목표는 MLPerf Tiny 이미지 분류(ResNet-8, CIFAR-10)다. NPU 연산은 ResNet-8을 기준으로 정한다. MNIST CNN은 MNIST로 학습하고, 시험 이미지로 분류 결과(top-1)까지 확인한다. | 합성곱과 잔차 덧셈이 레이아웃, 타일링, SRAM 할당, 재양자화를 모두 거치게 한다. MLPerf Tiny는 업계 기준점이다. 학습한 가중치와 실제 숫자 이미지여야 top-1이 뜻을 가진다. |
+| D5 | 데모 모델 | 처음 완성할 모델은 작은 MNIST CNN이고, 최종 목표는 MLPerf Tiny 이미지 분류(ResNet-8, CIFAR-10)다. NPU 연산은 ResNet-8을 기준으로 정한다. MNIST CNN은 MNIST로 학습하고, 시험 이미지로 분류 결과(top-1)까지 확인한다. ResNet-8은 MLPerf Tiny 학습 스크립트의 구조(필터 26개)를 CIFAR-10으로 학습하고, CC0-1.0 사진으로 top-1을 확인한다(6.6절, 12.4절). | 합성곱과 잔차 덧셈이 레이아웃, 타일링, SRAM 할당, 재양자화를 모두 거치게 한다. MLPerf Tiny는 업계 기준점이다. 학습한 가중치와 실제 이미지여야 top-1이 뜻을 가진다. MLPerf Tiny에는 필터 26개 모델의 int8 파일이 없다(6.6절). |
 | D6 | 데이터형 | TFLite 양자화 규격을 따르는 int8. | MLPerf Tiny 참조 구현이 TFLite Micro이므로, 그 참조 커널을 비트 단위 정답으로 쓸 수 있다. |
 | D7 | NPU 연산 | 층 단위 연산 CONV(완전 연결층은 1x1 합성곱이 된다), ADD, AVGPOOL. 각 연산은 출력에서 bias, 재양자화, ReLU clamp를 적용한다. softmax는 CPU에서 돈다. | Ethos-U(`NPU_OP_CONV`, `NPU_OP_POOL`, `NPU_OP_ELEMENTWISE`)와 TFLite Micro 참조 커널과 같은 단위다. |
 | D8 | 온칩 메모리 | NPU 안의 전용 SRAM 스크래치패드로, NPU DMA로만 채운다. 크기는 QEMU 장치 속성이고 기본값은 64 KiB이며, 읽기 전용 레지스터로 알린다. 드라이버는 이 값을 사용자 공간에 전달한다. | 64 KiB에서 MNIST CNN은 타일링이 필요 없고, ResNet-8은 14개 층 중 3개에서 타일링이 필요하다(6.6절). Ethos-U도 SRAM 크기를 사용자 공간에 알린다(`npu_info.sram_size`). |
@@ -371,9 +371,20 @@ TFLite 레이아웃을 그대로 쓰므로 생성기는 상수를 전치 없이 
 
 이중 버퍼링이 없으면 기본 크기에서 ResNet-8의 세 층에 타일링이 필요하다
 (add 26ch 78.0 KiB, conv3x3 52->104 s2 67.4 KiB, conv3x3 104->104
-108.5 KiB). 이중 버퍼링(D31)은 미리 읽는 타일마다 두 벌을 두므로, 같은 SRAM
-크기에서 표보다 많은 층을 타일링하게 된다. 같은 모델을 32, 64, 128 KiB로
-컴파일해 `PERF_DMA_*`와 컴파일러의 사이클 추정을 비교하는 시연을 계획한다.
+108.5 KiB). 타일 하나로 들어가는 층은 나누지 않으므로 타일링하는 층의 수는
+표와 같다. 64 KiB에서 앞의 두 층은 출력 H 타일로 나누고, conv3x3 104->104는
+가중치만 95.1 KiB라 한 행 타일로도 들어가지 않아 출력 채널 타일로 나눈다.
+지금의 타일 규칙(이중 버퍼링한 입출력)으로 계산하면 32 KiB에서는 출력 H 타일이
+일곱 층, 출력 채널 타일이 두 층이다. 같은 모델을 32, 64, 128 KiB로 컴파일해
+`PERF_DMA_*`와 컴파일러의 사이클 추정을 비교하는 시연을 계획한다.
+
+표의 ResNet-8은 MLPerf Tiny 학습 스크립트의 기본 구조(`keras_model.py`의
+`resnet_v1_eembc`, 필터 26개)다. MLPerf Tiny 저장소의 int8 파일은 필터
+16개(참조 모델 `pretrainedResnet_quant.tflite`)와
+40개(`pretrainedResnet_large_int8.tflite`)뿐이므로, 이 저장소는 같은 구조를
+학습 스크립트의 방법(`train.py`, 500 epoch)으로 CIFAR-10에서 학습해 int8로
+바꾼다(`models/resnet8/make_model.py`, 14절). 필터 16개 모델이라면 64 KiB에서
+타일링이 필요 없다.
 
 MNIST CNN에서는 FC 400->64를 출력 H 타일로 나눌 수 없어(출력 채널 타일은 M3)
 SRAM이 그 층 전체(재양자화 표까지 26.2 KiB)보다 커야 하고, 4 KiB 배수로는
@@ -661,9 +672,10 @@ CPU 층 (knpu-import가 남긴 함수와 그 전역)
 받은 작업을 하나씩 순서대로 처리하며, 큐가 차거나 대기 명령이 오면 처리기가
 기다린다. 작업의 길이는 DMA가 옮기는 바이트 수를 사이클당 바이트로,
 `OP_CONV`의 명목 MAC(명세 11절)을 사이클당 MAC으로, `OP_AVGPOOL`의 창 원소
-수(OH·OW·C·KH·KW)를 사이클당 원소로 나눈 값(올림)이다. 기본 가정값은
-사이클당 MAC 256개, DMA 16바이트, 창 원소 256개이고 명령마다의 고정 지연은
-없다. 실제 칩의 값이 아니라 스케줄을 비교하려는 가정이며 컴파일러 옵션으로
+수(OH·OW·C·KH·KW)와 `OP_ADD`의 출력 원소 수(OH·OW·C)를 각각 사이클당
+원소로 나눈 값(올림)이다. 기본 가정값은 사이클당 MAC 256개, DMA 16바이트,
+창 원소 256개, 덧셈 원소 256개이고 명령마다의 고정 지연은 없다. 실제 칩의
+값이 아니라 스케줄을 비교하려는 가정이며 컴파일러 옵션으로
 바꾼다. Vela의 `npu_performance.py`처럼 스케줄을 비교하는 데 쓴다. 겹침(층 안
 타일과 층 사이 상수의 이중 버퍼링, 활성값 SRAM 상주)이 있을 때와 없을
 때(`--overlap=false`), 그리고 SRAM 크기가 다를 때를 비교한다.
@@ -684,9 +696,18 @@ softmax처럼 NPU에서 돌지 않는 층(`cpu` 층)은 같은 C89 함수를 lcc
 - 상수(가중치, bias, 곱셈 계수, 시프트)는 초기값이 있는 `static const`
   배열로, 활성값은 `const`가 아닌 파일 범위 배열로 쓴다. 원소 순서는 TFLite
   그대로다(D28).
+- 활성값 배열은 모델 입력 `act0`과 층 N의 출력 `actN`이다. 층 함수는 TFLite
+  연산 순서대로 부르고, 층은 앞에서 쓴 어느 배열이든 읽을 수 있다. ResNet-8의
+  잔차에서는 한 배열을 두 층이 읽고, ADD는 두 배열을 읽는다. 이 이름은 CPU
+  단계가 가리키는 기호 이름이기도 하므로(9.5절), 바꾸면 MNIST 모델 파일이
+  달라진다.
 - 곱셈 계수와 시프트는 TFLite Micro의 식(`PopulateConvolutionQuantizationParams`,
   `QuantizeMultiplier`)을 반올림 방식마다 그대로 옮겨 계산한다. 시프트가
   30을 넘으면 단일 반올림 빌드만 값을 포화시키기 때문이다.
+- ADD의 매개변수는 TFLite Micro의 int8 식(`add_common.cc`)대로 구한다. 입력을
+  `left_shift` 20만큼 올려 더하는 계산(명세 8.3절)에 맞춰, 두 입력 스케일 중
+  큰 것의 두 배를 기준으로 두 입력과 출력의 곱셈 계수와 시프트를
+  `QuantizeMultiplierSmallerThanOneExp`로 구한다.
 - FC는 채널별과 텐서 단위 곱셈 계수를 모두 받는다. bias가 0인 Dense를
   변환하면 bias 입력이 없으므로(TF 2.21.0으로 확인), bias가 없는 FC는 0 배열을
   쓴다. `RESHAPE`는 바이트를 그대로 옮기는 루프다. NHWC의 Flatten은 바이트
@@ -757,6 +778,12 @@ void knpu_model(void)
 | | `kernel`, `stride`, `pad` | `conv2d`와 같다 |
 | | `zp` | 입력과 출력의 영점(TFLite Micro는 둘이 같아야 받는다) |
 | | `clamp` | (최소, 최대) |
+| `add` | `in`, `in2`, `out` | 두 입력과 출력 활성값(`signed char`, NHWC) |
+| | `shape` | (H, W, C). 두 입력과 출력이 같다(브로드캐스트 없음, 명세 6.4절) |
+| | `in_zp`, `in2_zp`, `out_zp` | 두 입력과 출력의 영점 |
+| | `in_mult`, `in_shift`, `in2_mult`, `in2_shift` | 두 입력의 곱셈 계수와 시프트(정수. 명세 6.1절 `SET_IFM_SCALE`, `SET_IFM2_SCALE`의 범위) |
+| | `out_mult`, `out_shift` | 출력의 곱셈 계수와 시프트(정수. `SET_OFM_SCALE`의 범위) |
+| | `clamp` | (최소, 최대) |
 | `fc` | `in`, `out` | 입력, 출력 벡터(`signed char`) |
 | | `w` | 가중치(`signed char`, [출력, 입력]. 1x1 합성곱의 OHWI와 같다) |
 | | `bias`, `mult`, `shift` | 출력마다 bias, 곱셈 계수, 시프트(`int`). 텐서 단위 곱셈 계수는 같은 값으로 채운다 |
@@ -783,7 +810,6 @@ void knpu_model(void)
 - `cpu` 층의 산술은 pragma에 적지 않는다. 컴파일러는 입출력 배열과 모양·영점만
   보고 데이터 흐름을 잇고, 본문은 lcc-opt가 컴파일한다(9.4절, D45). softmax의
   매개변수는 본문이 쓰는 `static const` 전역이다.
-- `add`와 그 키는 M3에서 더한다.
 
 ### 9.4 구현
 
@@ -794,26 +820,28 @@ MLIR의 `mlir/examples/standalone`과 같은 구성을 가진 트리 밖 MLIR
 
 방언 `knpu` 하나에 세 갈래의 연산을 둔다.
 
-- 그래프 연산(`knpu.conv2d`, `knpu.avgpool`, `knpu.cpu`. M3에서 `add`): 텐서
+- 그래프 연산(`knpu.conv2d`, `knpu.avgpool`, `knpu.add`, `knpu.cpu`): 텐서
   값을 받고 낸다. `knpu-import`가 만든 `func.func @knpu_model(%in:
   tensor<...>) -> tensor<...>` 안에 놓이고, 상수는 `arith.constant
   dense<...>`다. FC는 입력이 1x1x1xC인 1x1 `knpu.conv2d`이고(TFLite FC 가중치
   [출력, 입력]이 곧 OHWI다), reshape는 같은 버퍼를 다르게 보는
-  `tensor.reshape`다. `knpu.cpu`는 CPU 층 함수를 부르는 연산이고, 함수와
-  입출력 배열의 이름을 속성으로 가진다. 검증기는 명세 6.4절의 모양 조건을
-  본다.
-- 명령 연산(`knpu.dma`, `knpu.conv`, `knpu.pool`, `knpu.dma_wait`,
-  `knpu.kernel_wait`, `knpu.stop`): 명세의 OP·대기 명령과 거의 1:1이고, SET
-  명령의 값은 연산의 속성이다. 검증기는 SRAM 범위와 정렬을 본다.
+  `tensor.reshape`다. `knpu.add`는 같은 모양의 텐서 둘을 받아 하나를 내고,
+  명세 8.3절의 매개변수(영점 셋, 곱셈 계수와 시프트 셋, clamp)를 속성으로
+  가진다. `knpu.cpu`는 CPU 층 함수를 부르는 연산이고, 함수와 입출력 배열의
+  이름을 속성으로 가진다. 검증기는 명세 6.4절의 모양 조건을 본다.
+- 명령 연산(`knpu.dma`, `knpu.conv`, `knpu.pool`, `knpu.elementwise`,
+  `knpu.dma_wait`, `knpu.kernel_wait`, `knpu.stop`): 명세의 OP·대기 명령과
+  거의 1:1이고(`knpu.elementwise`는 `OP_ADD`), SET 명령의 값은 연산의
+  속성이다. 검증기는 SRAM 범위와 정렬을 본다.
 - 모델 파일 설명 연산(`knpu.region`, `knpu.io`, `knpu.cpu_step`,
   `knpu.cpu_code`): 영역 표, 입출력 텐서, CPU 단계, CPU 코드.
   `knpu-translate`가 명령 연산과 함께 `model.knpu`로 쓴다.
 
 | 패스 | 하는 일 |
 |------|---------|
-| `knpu-import` | pragma가 붙은 함수를 그래프 연산으로 바꾼다(`conv2d`, `avgpool`, 1x1 `conv2d`가 되는 `fc`, `reshape`, `cpu`). 상수 전역은 원소형을 되살려 텐서 상수로 만들고, 재양자화 표는 채널마다 (곱셈 계수, 시프트)로 엮는다. 바꾼 NPU 층 함수, `knpu.*` 속성, 더 쓰이지 않는 전역을 지운다. `cpu` 층 함수는 남기고 연결을 external로 바꾼다(공유 객체가 내보내도록). M2에서 `cpu` 층은 마지막 NPU 층 뒤에만 올 수 있다. |
-| `knpu-tile` | `sram-size`와 이중 버퍼링을 고려해 타일 크기(출력 H, 출력 채널)를 정하고, 층을 타일로 나눈다(`tensor.extract_slice`, 타일별 pad, `tensor.insert_slice`). avgpool도 합성곱과 같은 창 연산이라 출력 H 타일을 쓴다. FC(H = 1)는 출력 채널 타일(M3) 전까지 나누지 않고, 들어가지 않으면 오류다. 옵션 `overlap=false`이면 입출력 버퍼를 한 벌로 보고 정한다. |
-| `knpu-schedule` | arena 배치와 SRAM 배치를 정하고 명령 연산으로 낮춘다. 층 사이 활성값은 다음 층이 SRAM에서 바로 읽도록 남기고(들어갈 때), arena에는 모델 입력, CPU 층과 주고받는 텐서, SRAM에 남길 수 없는 텐서를 둔다. 층의 상수는 SRAM에 두 벌로 둔다. 상수를 쓰는 층의 연산 동안, 자리가 있으면 상수가 있는 다음 층의 상수를 미리 읽는다(avgpool·reshape처럼 상수가 없는 층은 건너뛴다). SRAM 배치는 버퍼마다 쓰이는 층의 범위(수명)로 정한다. 여러 층에 걸치는 버퍼(상주 활성값, 미리 읽는 상수)를 큰 것부터 놓고(TFLite Micro의 greedy 배치와 같은 방식) 한 층 안의 버퍼를 그 뒤에 놓으며, 들어가지 않으면 미리 읽기나 상주를 큰 버퍼부터 하나씩 거둔다. 층 안에서는 다음 타일의 입력 DMA를 현재 타일의 연산 앞에 둔다. CPU 층은 `knpu.cpu_step`(arena에서 배열로 복사, 함수 호출, 배열에서 arena로 복사)이 된다. 옵션 `overlap=false`는 비교용으로 미리 읽기와 상주 없이 층마다, 타일마다 arena를 왕복하는 직렬 스케줄을 낸다. |
+| `knpu-import` | pragma가 붙은 함수를 그래프 연산으로 바꾼다(`conv2d`, `avgpool`, `add`, 1x1 `conv2d`가 되는 `fc`, `reshape`, `cpu`). 배열 이름으로 데이터 흐름을 이으므로 한 텐서를 여러 층이 읽을 수 있다(ResNet-8의 잔차). 상수 전역은 원소형을 되살려 텐서 상수로 만들고, 재양자화 표는 채널마다 (곱셈 계수, 시프트)로 엮는다. 바꾼 NPU 층 함수, `knpu.*` 속성, 더 쓰이지 않는 전역을 지운다. `cpu` 층 함수는 남기고 연결을 external로 바꾼다(공유 객체가 내보내도록). M2에서 `cpu` 층은 마지막 NPU 층 뒤에만 올 수 있다. |
+| `knpu-tile` | `sram-size`와 이중 버퍼링을 고려해 타일 크기(출력 H, 출력 채널)를 정하고, 층을 타일로 나눈다(`tensor.extract_slice`, 타일별 pad, `tensor.insert_slice`). avgpool도 합성곱과 같은 창 연산이라 출력 H 타일을 쓰고, add는 두 입력과 출력을 같은 행 구간으로 나눈다. 한 행 타일로도 들어가지 않는 합성곱과 FC(H = 1)는 출력 채널을 나눈다. 채널 타일마다 가중치·bias·재양자화 표의 채널 구간(OHWI에서 연속)을 쓰고 출력 [1, H, W, n]을 채널 오프셋에 넣으며, 필요하면 출력 H 타일과 겹쳐 쓴다. 그래도 들어가지 않으면 오류다. 옵션 `overlap=false`이면 입출력 버퍼를 한 벌로 보고 정한다. |
+| `knpu-schedule` | arena 배치와 SRAM 배치를 정하고 명령 연산으로 낮춘다. 층 사이 활성값은 다음 층이 SRAM에서 바로 읽도록 남기고(들어갈 때), arena에는 모델 입력, CPU 층과 주고받는 텐서, SRAM에 남길 수 없는 텐서를 둔다. add는 입력이 둘이고, 잔차처럼 여러 층이 읽는 텐서도 같은 수명 배치로 SRAM에 남거나 arena를 거친다. 제자리 덧셈(명세 6.4절)은 쓰지 않는다. 층의 상수는 SRAM에 두 벌로 둔다. 상수를 쓰는 층의 연산 동안, 자리가 있으면 상수가 있는 다음 층의 상수를 미리 읽는다(avgpool·reshape처럼 상수가 없는 층은 건너뛴다). SRAM 배치는 버퍼마다 쓰이는 층의 범위(수명)로 정한다. 여러 층에 걸치는 버퍼(상주 활성값, 미리 읽는 상수)를 큰 것부터 놓고(TFLite Micro의 greedy 배치와 같은 방식) 한 층 안의 버퍼를 그 뒤에 놓으며, 들어가지 않으면 미리 읽기나 상주를 큰 버퍼부터 하나씩 거둔다. 층 안에서는 다음 타일의 입력 DMA를 현재 타일의 연산 앞에 둔다. 출력 채널 타일은 입력이 들어가면 한 번 읽어 함께 쓰고, 다음 타일의 상수를 미리 읽으며, 출력을 SRAM에 남기지 않고 2-D DMA(행 길이 n, 횟수 H·W, DRAM 쪽 간격 C)로 arena에 쓴다. CPU 층은 `knpu.cpu_step`(arena에서 배열로 복사, 함수 호출, 배열에서 arena로 복사)이 된다. 옵션 `overlap=false`는 비교용으로 미리 읽기와 상주 없이 층마다, 타일마다 arena를 왕복하는 직렬 스케줄을 낸다. |
 | `knpu-insert-waits` | 명세 9절의 큐 규칙(큐 깊이 2, 암묵 대기, 반대쪽 큐와의 SRAM 겹침)을 따라가며 충돌하는 곳에만 대기 명령을 넣는다. Vela의 대기 계산과 같은 방식이다. |
 | `knpu-estimate` | 대기 명령까지 들어간 명령열을 큐 모델로 따라가며 명령마다 시작·끝 사이클을 정하고, 층마다와 전체의 추정 사이클을 남긴다(9.1절). |
 
@@ -920,12 +948,14 @@ CPU 섹션 둘은 형식 minor 1에서 더했다. CPU 층이 있는 모델만 �
   빌드해 `/usr/bin`에 넣는다. Rust 툴체인은 미리 빌드된 것(`host-rust-bin`
   1.97.1)을 쓴다. 외부 크레이트가 없으므로 `Cargo.lock`만으로 `--offline
   --locked` 빌드가 된다.
-- 시험 모델(`models/conv/vectors/`, `models/mnist/vectors/`: 컴파일한 모델,
-  입력, TFLite Micro 정답값. MNIST는 숫자 이미지 `models/mnist/digits/`도)은
-  `knpu-models` 패키지가 `/usr/share/knpu/conv/`, `/usr/share/knpu/mnist/`에
-  넣는다. 그래서 부팅한 보드에서 바로 `knpu-infer`를 돌릴 수 있다. 이
-  파일들은 컴파일러와 V2가 만든 것을 커밋한 것이고, push CI의 V3가 지금 만든
-  것과 같은지 검사한다.
+- 시험 모델(`models/conv/vectors/`, `models/mnist/vectors/`,
+  `models/resnet8/vectors/`: 컴파일한 모델, 입력, TFLite Micro 정답값. MNIST는
+  숫자 이미지 `models/mnist/digits/`, ResNet-8은 사진
+  `models/resnet8/photos/`도)은 `knpu-models` 패키지가
+  `/usr/share/knpu/conv/`, `/usr/share/knpu/mnist/`,
+  `/usr/share/knpu/resnet8/`에 넣는다. 그래서 부팅한 보드에서 바로
+  `knpu-infer`를 돌릴 수 있다. 이 파일들은 컴파일러와 V2가 만든 것을 커밋한
+  것이고, push CI의 V3가 지금 만든 것과 같은지 검사한다.
 - 호스트 시험(`cargo test`)은 CPU 섹션의 파싱과 검사까지 한다. 올리기(memfd,
   `dlopen`, `dladdr1`), 형식 11절 7번, 단계 실행은 호스트 `cc`로 만든 시험 공유
   객체로 본다. 이 시험은 AArch64 검사(파싱)를 거치지 않고 로더를 직접 부른다.
@@ -1036,15 +1066,26 @@ CPU 코드의 바이트는 apt.llvm.org LLVM 23 패키지(`mlir-23-tools`, `clan
 | `br2-external/` | GPL-2.0-or-later. 패치는 대상 프로젝트를 따른다 | Buildroot `COPYING`. |
 | 그 밖의 모든 것 | Apache-2.0 WITH LLVM-exception | D18. |
 
-외부에서 가져온 입력은 원래 라이선스를 유지한다: MLPerf Tiny
-모델(Apache-2.0), TFLite `schema.fbs`와 빌드할 때 받는 TFLite Micro
-소스(Apache-2.0), flatbuffers(Apache-2.0), MNIST 시험
+외부에서 가져온 입력은 원래 라이선스를 유지한다: TFLite `schema.fbs`와 빌드할
+때 받는 TFLite Micro 소스(Apache-2.0), flatbuffers(Apache-2.0), MNIST 시험
 이미지(`models/mnist/digits/`, CC BY-SA 3.0, 저작권자 Yann LeCun과 Corinna
 Cortes). MNIST로 학습한 모델(`models/mnist/mnist.tflite`), 그것을 컴파일한
 모델 파일과 TFLite Micro로 낸 정답값(`models/mnist/vectors/`)도 MNIST의
 라이선스로 선언하고, 저작권자에 이 저장소의 저작자를 더한다. 같은 디렉터리의
 무작위·극단 입력은 MNIST에서 온 것이 아니므로 그 밖의 것과 같이 Apache-2.0
 WITH LLVM-exception이다.
+
+ResNet-8은 MLPerf Tiny의 모델 정의(`keras_model.py`, Apache-2.0)와 같은 구조를
+이 저장소의 코드로 써서 CIFAR-10으로 학습한다(6.6절). CIFAR-10은 기술
+보고서(Krizhevsky 2009)를 인용하라고만 하고 라이선스를 밝히지 않으므로(14절),
+CIFAR-10 이미지는 저장소에 넣지 않는다. CIFAR-10으로 학습한
+모델(`models/resnet8/resnet8.tflite`), 그것을 컴파일한 모델 파일과 정답값,
+무작위·극단 입력(`models/resnet8/vectors/`)은 그 밖의 것과 같이 Apache-2.0
+WITH LLVM-exception이고, 저작권자는 이 저장소의 저작자다. CIFAR-10의 출처와
+라이선스가 밝혀져 있지 않다는 사실은 `make_model.py`에도 적는다. 분류 결과를
+보이는 사진(`models/resnet8/photos/`)은 Wikimedia Commons의 CC0-1.0 사진을
+32x32로 줄인 것이라 CC0-1.0을 유지하고, 사진마다 출처와 저작자를
+`make_photos.py`와 `REUSE.toml`에 적는다.
 
 lcc는 저장소에 넣지 않고 빌드할 때 내려받는다(9.4절). lcc의
 라이선스(`CPYRIGHT`)는 그 파일과 함께 재배포하는 것은 허락하지만, lcc나
@@ -1095,12 +1136,13 @@ lcc_llvm 소스 압축에는 lcc도 들어 있으므로 압축과 풀어 놓은 
 | Buildroot | master `f03de2f`(2026-11-02), 릴리스 2026.08.1 | `BR2_LINUX_KERNEL_CUSTOM_DTS_PATH`(`linux/Config.in:502`)와 설정 방식(228-267); `BR2_TARGET_UBOOT_CUSTOM_DTS_PATH`(`boot/uboot/Config.in:824`); Bootlin 외부 툴체인(`toolchain-external-bootlin`); Rust(`package/rustc/Config.in.host:146-158`의 `host-rust-bin` 기본값, `package/rust-bin/rust-bin.mk:9`의 1.97.1, `package/pkg-cargo.mk`의 vendoring과 `--offline --locked` 빌드, `package/pkg-generic.mk`의 local 방식 rsync 222-231·645-652); `BR2_GLOBAL_PATCH_DIR`; 호스트 QEMU; TF-A 옵션; 커널 모듈 방식; `BR2_EXTERNAL` 매뉴얼; 릴리스 2026.08.1의 glibc 판(`package/glibc/glibc.mk:10`, 2.44) |
 | Buildroot 릴리스 | buildroot.org 내려받기 페이지(2026-11-05 조회) | 2026.08.1 안정판(지원 종료 2026년 12월); 2025.02.19 LTS(지원 종료 2028년 3월) |
 | glibc | 2.44(Buildroot가 받은 소스의 `NEWS`) | 2.34에서 `libdl`이 libc에 합쳐짐, 2.27에서 `memfd_create`가 생김(10절, D45) |
-| TFLite Micro | `fd2a85d`(2026-11-04) | 참조 커널(`conv.h:54-131`); 반올림 구현(`common.cc:31-113`); `schema.fbs`; int8 `ConvPerChannel`, `FullyConnected`, `AddFunc`, `AveragePool`과 고정소수점 보조 함수(행 번호는 `docs/npu-spec.md` 13절); CMake 빌드(`CMakeLists.txt`, `cmake/generated/tflm_sources.cmake`)와 flatbuffers 고정(`MODULE.bazel`의 v25.9.23); Python 스키마(`tensorflow/lite/micro/python/schema_py_generated.py`); 합성곱 양자화 파라미터와 clamp(`tensorflow/lite/micro/kernels/kernel_util.cc:60-90`, 369-445), `QuantizeMultiplier`(`tensorflow/lite/micro/kernels/internal/quantization_util.cc:54-104`); int8 `Softmax`(`kernels/internal/reference/softmax.h:67-148`. 이 행에 더한 경로는 `tensorflow/lite/micro/` 기준)와 그 매개변수(`kernels/softmax_common.cc:80-138`, `kernels/internal/quantization_util.cc:283-320, 339-356`), `MultiplyByQuantizedMultiplierGreaterThanOne`의 두 구현(`kernels/internal/common.h:342-353, 386-395`), gemmlowp를 옮긴 `kernels/internal/fixedpoint.h`, `GetReciprocal`(`kernels/internal/common.h:968-982`); FC 양자화(`kernels/fully_connected_common.cc:54-156`, `kernels/kernel_util.cc:447-454`), pool의 입출력 양자화 조건(`kernels/pooling_common.cc:70-75`); 인터프리터의 중간 텐서(`micro_interpreter.h:59, 125`) |
-| TensorFlow | 2.21.0으로 6.6절의 MNIST 구조를 int8 변환(2026-11-23) | 연산 순서(Flatten은 `RESHAPE`), VALID 합성곱과 6.6절 MAC 수, Dense의 채널별 가중치 스케일, bias가 0인 Dense의 bias 입력 없음, softmax 출력 양자화(6.4, 9.2절) |
+| TFLite Micro | `fd2a85d`(2026-11-04) | 참조 커널(`conv.h:54-131`); 반올림 구현(`common.cc:31-113`); `schema.fbs`; int8 `ConvPerChannel`, `FullyConnected`, `AddFunc`, `AveragePool`과 고정소수점 보조 함수(행 번호는 `docs/npu-spec.md` 13절); CMake 빌드(`CMakeLists.txt`, `cmake/generated/tflm_sources.cmake`)와 flatbuffers 고정(`MODULE.bazel`의 v25.9.23); Python 스키마(`tensorflow/lite/micro/python/schema_py_generated.py`); 합성곱 양자화 파라미터와 clamp(`tensorflow/lite/micro/kernels/kernel_util.cc:60-90`, 369-445), `QuantizeMultiplier`(`tensorflow/lite/micro/kernels/internal/quantization_util.cc:54-104`); int8 `Softmax`(`kernels/internal/reference/softmax.h:67-148`. 이 행에 더한 경로는 `tensorflow/lite/micro/` 기준)와 그 매개변수(`kernels/softmax_common.cc:80-138`, `kernels/internal/quantization_util.cc:283-320, 339-356`), `MultiplyByQuantizedMultiplierGreaterThanOne`의 두 구현(`kernels/internal/common.h:342-353, 386-395`), gemmlowp를 옮긴 `kernels/internal/fixedpoint.h`, `GetReciprocal`(`kernels/internal/common.h:968-982`); FC 양자화(`kernels/fully_connected_common.cc:54-156`, `kernels/kernel_util.cc:447-454`), pool의 입출력 양자화 조건(`kernels/pooling_common.cc:70-75`); 인터프리터의 중간 텐서(`micro_interpreter.h:59, 125`); int8 ADD의 양자화 매개변수(`kernels/add_common.cc:47-66`) |
+| TensorFlow | 2.21.0으로 6.6절의 MNIST 구조를 int8 변환(2026-11-23), 필터 26개 ResNet-8을 Keras 3.15.1로 만들어 학습 step을 돌림(2026-11-24) | 연산 순서(Flatten은 `RESHAPE`), VALID 합성곱과 6.6절 MAC 수, Dense의 채널별 가중치 스케일, bias가 0인 Dense의 bias 입력 없음, softmax 출력 양자화(6.4, 9.2절); Keras 3의 `keras`에는 `ImageDataGenerator`가 없어(`tf.keras`에만 있음) 증강을 `RandomRotation`, `RandomTranslation`, `RandomFlip` 층으로 함, Keras의 파라미터 205,306개에 BatchNorm 1,560개가 들어 있음(TFLite에서는 합성곱에 접혀 6.6절의 203,746개) |
 | PyPI | `flatbuffers` 25.9.23(2026-11-22 조회) | 생성기의 `.tflite` 읽기. Apache-2.0 |
 | lcc_llvm | 태그 `v4.2-llvm.3`(커밋 `3619447`, 2026-11-22) | `#pragma`의 문법, 자리, 속성 모양(README의 "#pragma를 MLIR 함수 속성으로" 절, `src/pragma.c`, `tst/pragma/`); mlir 드라이버의 LLVM 23(README "필요한 것"); 초기값이 있는 전역의 바이트 문자열 출력과 `long`의 i64(aarch64 mlir 드라이버로 내려 확인); lcc-opt가 함수 속성 안에서 가리키는 전역을 바꾸지 않음(`lcc-opt/README.md:263`, `lcc-opt/test/pragma-attrs.mlir`); `CPYRIGHT`; 릴리스 압축의 sha256; lcc-opt의 빌드와 동적 링크(`lcc-opt/README.md:29-40`), 쓰는 흐름(42-60), 파이프라인(98-104), CI가 `--lcc-to-linalg --lcc-lower`를 씀(523), MLIR 23만 받음(`README.md:367`), 포팅 규약(`README.md:353-363`); 릴리스에 lcc-opt 바이너리가 없음(`gh release view`) |
 | LiteRT | 양자화 규격(developers.google.com/edge/litert/models/quantization_spec, 2026-11-05 조회) | D6 |
-| MLPerf Tiny | `4addd0f`(2026-07-13) | ResNet-8 정의(`keras_model.py`, 35행의 "200k params"), int8 `.tflite` 파일, Apache-2.0 |
+| MLPerf Tiny | `4addd0f`(2026-07-13) | `benchmark/training/image_classification/`의 ResNet-8 정의(`keras_model.py` 35-36행: "200k params"와 `resnet_v1_eembc(conv_filters=26)`. 필터 수 인자는 `9adec29`에서 생김), 학습 방법(`train.py`), int8 변환(`model_converter.py`); 그 아래 `trained_models/`의 int8 파일은 필터 16개(`pretrainedResnet_quant.tflite`)와 40개(`pretrainedResnet_large_int8.tflite`)뿐임(6.6절); Apache-2.0(`LICENSE.md`) |
+| CIFAR-10 | 공식 페이지(cs.toronto.edu/~kriz/cifar.html), Hugging Face `uoft-cs/cifar10` 데이터 카드, keras.io의 CIFAR-10 페이지(2026-11-24 조회) | ResNet-8의 학습 데이터; 라이선스가 밝혀져 있지 않고 기술 보고서(Krizhevsky 2009) 인용만 요청함(카드는 `license: unknown`, 12.4절); Keras가 내려받으며 확인하는 SHA-256 |
 | Keras | keras.io/api/datasets/mnist/(2026-11-23 조회) | MNIST의 저작권자(Yann LeCun, Corinna Cortes)와 CC BY-SA 3.0(12.4절) |
 | llvm-project | main `da1fdef`(24.0.0, 2026-11-05), 태그 `llvmorg-22.1.8`, `llvmorg-23.1.5` | `tosa.rescale`(`TosaOps.td:2651`), 반올림 enum(`TosaOpBase.td:397-403`); `ConvertConv2DToImg2Col.cpp`; 설치된 21.1.8은 문자열 속성을 씀(`TosaTypesBase.td:256-258`); `mlir/examples/standalone`(`CMakeLists.txt`, `standalone-opt`, `standalone-translate`) |
 | apt.llvm.org | noble, `libmlir-23-dev` 23.1.6 스냅숏(2026-11-16 빌드, `5b10d2d`) | D17; lcc 출력을 `mlir-opt`로 읽어 확인 |
