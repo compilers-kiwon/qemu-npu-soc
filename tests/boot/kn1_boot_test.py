@@ -143,6 +143,11 @@ def boot_to_shell(con, timeout, what):
           f"{what}: U-Boot boots Linux through extlinux")
     con.send("root")
     con.expect(PROMPT, 30)
+    # Keep kernel messages off the console from here on, as Buildroot's
+    # runtime tests do (support/testing/infra/emulator.py): they can land
+    # in the middle of a command's output. The tests read the kernel log
+    # with dmesg.
+    con.run("dmesg -n 1")
     print(f"PASS: {what}: logged in on UART0")
 
 
