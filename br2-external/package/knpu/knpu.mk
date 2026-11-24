@@ -28,9 +28,12 @@ define KNPU_LINUX_CONFIG_FIXUPS
 endef
 
 # The GEM DMA helpers and the GPU scheduler have no prompt, so only another
-# driver can select them. arm64's defconfig does; a smaller kernel
-# configuration has to keep one such driver.
+# driver can select them: kn1_defconfig builds the Ethos-U driver as a
+# module for this (docs/design.md 8.1).
 KNPU_KERNEL_OPTS = CONFIG_DRM_ACCEL CONFIG_DRM_GEM_DMA_HELPER CONFIG_DRM_SCHED
+# The timeout recovery calls pm_runtime_force_resume(), an empty stub
+# without CONFIG_PM_SLEEP (docs/design.md 8.2)
+KNPU_KERNEL_OPTS += CONFIG_PM_SLEEP
 
 define KNPU_CHECK_KERNEL_CONFIG
 	$(foreach opt,$(KNPU_KERNEL_OPTS), \

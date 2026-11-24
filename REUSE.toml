@@ -40,6 +40,13 @@ path = "br2-external/configs/*_defconfig"
 SPDX-FileCopyrightText = "2026 Kiwon Kwon"
 SPDX-License-Identifier = "GPL-2.0-or-later"
 
+# Kernel configuration that make br-linux-update-defconfig writes, without
+# comments (docs/design.md 8.1)
+[[annotations]]
+path = "br2-external/board/kn1-evb/kn1_defconfig"
+SPDX-FileCopyrightText = "2026 Kiwon Kwon"
+SPDX-License-Identifier = "GPL-2.0-or-later"
+
 # Glue patches for upstream trees carry the upstream's license
 [[annotations]]
 path = "hw/qemu/patches/*.patch"

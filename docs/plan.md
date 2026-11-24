@@ -328,13 +328,20 @@ push CI의 `compiler` 작업에서 그대로 통과한다.
 
 ### M2.7 커널 설정 `kn1_defconfig` (부팅 시험, V5)
 
-- `br2-external/board/kn1-evb/kn1_defconfig`: `allnoconfig`에서 kn1에 필요한
-  것만 켠 `savedefconfig` 형태(설계 8.1절). GEM DMA 헬퍼와 `drm_sched`는
-  `CONFIG_DRM_ACCEL_ARM_ETHOSU=m`으로 켠다.
+- `br2-external/board/kn1-evb/kn1_defconfig`: `allnoconfig`에 설계 8.1절 표의
+  기호를 켠 설정의 `savedefconfig` 출력(주석 없음, 라이선스는 `REUSE.toml`).
+  GEM DMA 헬퍼와 `drm_sched`는 `CONFIG_DRM_ACCEL_ARM_ETHOSU=m`으로, 타임아웃
+  복구가 쓰는 `PM_SLEEP`은 `CONFIG_SUSPEND`로 켠다(설계 8.2절). Buildroot의
+  init 스크립트가 쓰는 네트워크(`NET`, `UNIX`, `INET`)도 켠다.
 - `kn1_evb_defconfig`가 `BR2_LINUX_KERNEL_USE_CUSTOM_CONFIG`로 이것을 쓴다.
+- `knpu` 패키지의 빌드 전 검사에 `CONFIG_PM_SLEEP`을 더한다.
+- 야간 CI: 빌드 뒤 `make br-linux-update-defconfig`와 `git diff --exit-code`로
+  파일이 `savedefconfig` 형태인지 본다.
+- README: 빌드 설명의 커널 설정과 CI 절의 야간 작업.
 
 완료 조건: 이 설정으로 빌드한 커널에서 부팅 시험(M1.2의 확인 항목), V5,
-합성곱 모델의 V6이 통과하고 커널 경고가 없다.
+합성곱 모델의 V6이 통과하고, 커널 경고가 없으며, init 스크립트가 모두 "OK"다.
+야간 작업이 형태 검사를 포함해 한 번 성공한다.
 
 ### M2.8 끝에서 끝까지 (V6)
 

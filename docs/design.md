@@ -498,13 +498,28 @@ QEMU의 PL181 모델에는 DMA가 없고, QEMU의 SD 카드 모델은 2 GiB 이�
 ### 8.1 커널
 
 Linux 7.3.1(D43)을 Buildroot로 빌드한다. 설정(D35)은
-`br2-external/board/kn1-evb/kn1_defconfig`다. `allnoconfig`에서 kn1에 필요한
-것만 켠 `savedefconfig` 형태이고, Buildroot가
+`br2-external/board/kn1-evb/kn1_defconfig`이고, Buildroot가
 `BR2_LINUX_KERNEL_USE_CUSTOM_CONFIG`로 쓴다. M1의 첫 부팅은 arm64
-`defconfig`를 썼다. kn1에 필요한 것은 GICv3, generic timer, PSCI, PL011,
-PL031, SBSA 워치독, virtio-mmio 블록, 고정 클록, DRM accel(`knpu` 모듈용)이고,
-그 밖에 모듈 적재, devtmpfs, ext4, 보드 DT의 NPU CMA 풀(CMA, DMA CMA), runtime
-PM, debugfs(V5의 `inject_hang`)가 필요하다.
+`defconfig`를 썼다. 이 파일은 `allnoconfig`에 아래 표의 기호를 켠 설정을
+`savedefconfig`로 저장한 것이다. GICv3, generic timer, PSCI, 고정 클록(공통
+클록)은 `ARM64`가 select하므로 표에 없다.
+
+| 쓰는 곳 | 기호 |
+|---------|------|
+| PL011 콘솔 | `SERIAL_AMBA_PL011`, `SERIAL_AMBA_PL011_CONSOLE` |
+| PL031 | `RTC_CLASS`, `RTC_DRV_PL031`, `RTC_HCTOSYS`(부팅 때 시스템 시각), `RTC_INTF_SYSFS`(부팅 시험이 읽는 `rtc0/name`) |
+| SBSA 워치독 | `WATCHDOG`, `ARM_SBSA_WATCHDOG` |
+| virtio-mmio 블록 | `VIRTIO_MENU`, `VIRTIO_MMIO`, `BLK_DEV`, `VIRTIO_BLK` |
+| `knpu` 모듈 | `MODULES`, `MODULE_UNLOAD`(V5의 모듈 재적재), `DRM=m`, `DRM_ACCEL`, `DRM_ACCEL_ARM_ETHOSU=m`(아래), `CMA`, `DMA_CMA`(보드 DT의 NPU CMA 풀), `PM`(runtime PM), `SUSPEND`(`PM_SLEEP`, 8.2절의 타임아웃 복구), `DEBUG_FS`(V5의 `inject_hang`, `last_submit`, 클록 상태) |
+| 루트 파일 시스템 | `EXT4_FS`, `DEVTMPFS`, `DEVTMPFS_MOUNT`, `BINFMT_ELF`, `BINFMT_SCRIPT`, `TMPFS`(fstab의 tmpfs. 런타임의 `memfd_create`도 이것이 select한다) |
+| Buildroot의 init 스크립트 | `NET`, `UNIX`(syslogd와 klogd의 `/dev/log`), `INET`(네트워크 스크립트의 루프백) |
+
+`allnoconfig`가 끈 기본값 y(CPU 정오표 우회, EFI, IPv6, USB 등)는 파일에
+`is not set` 줄로 남는다. 설정은 `make br-linux-menuconfig`로 바꾸고
+`make br-linux-update-defconfig`로 파일에 다시 쓴다. 이 대상은 주석을 남기지
+않으므로 파일에는 주석을 두지 않는다(라이선스는 `REUSE.toml`). 커널 버전을
+올리면 새 기본값 y가 켜진 채 들어오므로, 위 표의 기호로 `allnoconfig`부터
+다시 만든다. 야간 CI는 빌드한 설정을 다시 저장해 파일과 같은지 본다(11절).
 
 `CONFIG_DRM_ACCEL`은 `knpu` 패키지도 Buildroot의 커널 설정
 수정(`KNPU_LINUX_CONFIG_FIXUPS`)으로 켠다. 드라이버가 쓰는 GEM DMA 헬퍼와
@@ -512,7 +527,7 @@ PM, debugfs(V5의 `inject_hang`)가 필요하다.
 `kn1_defconfig`는 이를 위해 `CONFIG_DRM_ACCEL_ARM_ETHOSU=m`을 켠다. Ethos-U
 드라이버는 `HAS_IOMEM`, `DRM_ACCEL`, `ARM64`에만 기대고 두 헬퍼를 select한다.
 그 모듈은 빌드만 되고 쓰지 않는다(DT에 맞는 노드가 없다). 패키지는 빌드 전에
-세 옵션이 모두 켜졌는지 확인한다(13절 5번).
+세 옵션과 `CONFIG_PM_SLEEP`(8.2절)이 모두 켜졌는지 확인한다(13절 5번).
 
 ### 8.2 드라이버 `knpu`
 
@@ -535,9 +550,14 @@ PM, debugfs(V5의 `inject_hang`)가 필요하다.
   그 작업의 fence를 `-EIO`로 끝낸다. 장치는 이미 멈춰 있으므로 리셋하지 않고
   다음 작업을 받는다.
 - 타임아웃(500 ms): runtime PM으로 장치를 껐다 켜서 soft reset하고, 그 작업은
-  `-ECANCELED`로 끝난다. 완료 인터럽트가 올라와 있거나 처리 중인 작업은 멈춘
-  것으로 보지 않는다. QEMU는 작업을 메인 루프에서 한 번에 실행하므로, 긴
-  작업 뒤에는 게스트 시계가 한꺼번에 흐를 수 있기 때문이다.
+  `-ECANCELED`로 끝난다. 껐다 켜기는 Ethos-U처럼 `pm_runtime_force_suspend()`와
+  `pm_runtime_force_resume()`으로 한다. Linux 7.3.1에서 뒤의 함수는
+  `CONFIG_PM_SLEEP`이 없으면 `-ENXIO`만 돌려주는 빈
+  함수라(`include/linux/pm_runtime.h`), 그런 설정에서는 복구 뒤 장치가 꺼지고
+  runtime PM도 꺼진 채 남는다. 그래서 커널 설정에 `PM_SLEEP`이 있어야
+  한다(8.1절). 완료 인터럽트가 올라와 있거나 처리 중인 작업은 멈춘 것으로 보지
+  않는다. QEMU는 작업을 메인 루프에서 한 번에 실행하므로, 긴 작업 뒤에는
+  게스트 시계가 한꺼번에 흐를 수 있기 때문이다.
 - 클록: DT에서 받아 runtime PM(autosuspend 50 ms)으로 켜고 끈다. resume은
   soft reset 뒤 `IRQ_ENABLE`을 다시 쓴다. `ethosu_drv.c`와 같은 방식이다(D37).
 - debugfs(`/sys/kernel/debug/accel/<장치>/`): `inject_hang`에 1을 쓰면 다음
@@ -930,6 +950,8 @@ test`: 모델 파싱과 검사, 시험 공유 객체로 CPU 코드 올리기와 
 빌드와 V1, V5, V6을 돌린다. V3의 CPU 부분을 위해 push CI는 aarch64 교차
 gcc와 qemu-user도 설치한다. 바인딩과 DT의
 스키마 검사(`tests/dt/check-dt.sh`)도 push마다 돈다. 야간 작업은 전체 빌드,
+`kn1_defconfig`의 형태 검사(빌드한 커널 설정을
+`make br-linux-update-defconfig`로 다시 저장하고 `git diff`로 비교, 8.1절),
 부팅 스모크 시험(`tests/boot/`, M1.2 완료 조건), V1(`tests/qemu/run-v1.sh`),
 V5(`tests/driver/kn1_v5_test.py`), V6(`tests/e2e/kn1_v6_test.py`)을 돌린다.
 빌드와 시험의 진입점은 저장소 맨 위 `Makefile`의 대상이고(`make`, `make test`,
@@ -1037,7 +1059,8 @@ lcc_llvm 소스 압축에는 lcc도 들어 있으므로 압축과 풀어 놓은 
    8.2절). 비트 일치 시험은 M2.4의 V3에서 MNIST의 두 FC로 한다(6.4절).
 5. 정함(2026-11-23): `kn1_defconfig`에서 `CONFIG_DRM_ACCEL_ARM_ETHOSU=m`이
    GEM DMA 헬퍼와 `drm_sched`를 select한다. 연결 패치는 두지 않는다(8.1절,
-   D35).
+   D35). 확인함(2026-11-24): 이 설정으로 두 헬퍼가 모듈로 켜지고 V5가
+   통과한다. 타임아웃 복구에 필요한 `PM_SLEEP`은 `SUSPEND`로 켠다(8.2절).
 6. 확정됨(2026-11-22): softmax처럼 NPU에서 돌지 않는 연산은 같은 C89를
    lcc_llvm의 lcc-opt(Apache-2.0 WITH LLVM-exception)로 affine·linalg로 올려
    최적화한 뒤 aarch64 코드로 내린다. 정함(2026-11-23): lcc-opt는 lcc_llvm

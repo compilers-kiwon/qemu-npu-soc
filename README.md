@@ -74,7 +74,7 @@ make
 저장소 맨 위의 `Makefile`이 빌드와 시험의 진입점이다. `make help`가 대상
 목록을 보여 준다. `make`는 처음에 `kn1_evb_defconfig`을 읽어 `output/`을
 만들고, Buildroot로 툴체인, TF-A 2.15.0(`plat/kiwon/kn1`), U-Boot 2026.10,
-Linux 7.3.1(arm64 `defconfig`에 `CONFIG_DRM_ACCEL`), NPU 드라이버 모듈
+Linux 7.3.1(kn1에 필요한 것만 켠 `kn1_defconfig`), NPU 드라이버 모듈
 `knpu`와 V5 시험 프로그램, Rust 런타임 `knpu-infer`와 시험 모델, 루트 파일
 시스템, 디바이스 트리, 그리고 kn1-evb 머신을 넣은 QEMU 11.1.3을 모두
 빌드한다. 결과물은 `output/images/`에
@@ -284,8 +284,8 @@ make update-vectors
 GitHub Actions에서는 push마다 defconfig, `check-package`, `reuse lint`,
 NPU 공유 코어 시험(V2, V3), 모델 컴파일러 시험(V2~V4), 런타임 호스트 시험,
 바인딩과 디바이스 트리의 스키마 검사를 돌리고(`ci.yml`), 매일 밤과 수동 실행
-때 전체 빌드, 부팅 시험, V1, V5, V6을 돌린다(`nightly.yml`). 두 워크플로는
-위의 `make` 대상을 부른다.
+때 전체 빌드, `kn1_defconfig` 형태 검사, 부팅 시험, V1, V5, V6을
+돌린다(`nightly.yml`). 두 워크플로는 위의 `make` 대상을 부른다.
 
 ## 현재 상태
 

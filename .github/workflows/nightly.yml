@@ -1,8 +1,9 @@
 # SPDX-FileCopyrightText: 2026 Kiwon Kwon
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-# Full Buildroot build, boot smoke test, V1 and V5 (docs/design.md D42).
-# Runs every night and on demand; the per-push checks are in ci.yml.
+# Full Buildroot build, the check that kn1_defconfig is in savedefconfig
+# form, boot smoke test, V1, V5 and V6 (docs/design.md D42, 11). Runs every
+# night and on demand; the per-push checks are in ci.yml.
 
 name: Nightly
 
@@ -65,7 +66,16 @@ jobs:
         id: build
         run: make 2>&1 | tee build.log | grep --line-buffered '^>>>'
 
+      # kn1_defconfig is the kernel's savedefconfig output (docs/design.md
+      # 8.1): saving the configuration of this build must not change it.
+      - name: Check that kn1_defconfig is in savedefconfig form
+        run: |
+          make br-linux-update-defconfig
+          git diff --exit-code -- br2-external/board/kn1-evb/kn1_defconfig
+
+      # Runs after a successful build even when the check above failed
       - name: Boot smoke test
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: make test-boot
 
       # Runs after a successful build even when the boot test failed
