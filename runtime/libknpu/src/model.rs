@@ -2,8 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 //! model.knpu v0 (docs/model-format.md): parsing and the checks of its
-//! section 9 that do not need the device. [`Model::check_device`] does the
-//! rest.
+//! section 11 that need neither the device nor the loaded CPU code.
+//! [`Model::check_device`] does those of the device, and the CPU code
+//! loader (cpu.rs) rule 7.
 
 use crate::{DeviceInfo, Error, Result};
 
@@ -18,6 +19,17 @@ const KIND_CMDS: u32 = 1;
 const KIND_REGIONS: u32 = 2;
 const KIND_CONST: u32 = 3;
 const KIND_TENSORS: u32 = 4;
+const KIND_CPU_CODE: u32 = 5;
+const KIND_CPU_STEPS: u32 = 6;
+
+/// The ELF header of CPU_CODE (docs/model-format.md 9).
+const ELF_HEADER_SIZE: usize = 64;
+const ET_DYN: u16 = 3;
+const EM_AARCH64: u16 = 183;
+
+/// CPU_STEPS (docs/model-format.md 10).
+const STEPS_HEADER: usize = 16;
+const STEP_ENTRY: usize = 16;
 
 /// Command numbers the runtime looks at (docs/npu-spec.md 6.1).
 const CMD_MASK: u32 = 0xFFFF;
@@ -60,6 +72,29 @@ pub struct Tensor {
     pub zero_point: i32,
 }
 
+/// What a CPU step does (docs/model-format.md 10).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StepKind {
+    /// Copies `size` bytes at `offset` of the region into the array.
+    CopyIn,
+    /// Calls the function, `void f(void)`.
+    Call,
+    /// Copies the array to `offset` of the region.
+    CopyOut,
+}
+
+/// One entry of CPU_STEPS. A call has region, offset and size 0.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CpuStep {
+    pub kind: StepKind,
+    /// The arena region of a copy.
+    pub region: u32,
+    /// The symbol in the CPU code, a C identifier.
+    pub name: String,
+    pub offset: u32,
+    pub size: u32,
+}
+
 /// A checked model.knpu file.
 #[derive(Debug, Clone)]
 pub struct Model {
@@ -70,6 +105,11 @@ pub struct Model {
     pub cmds: Vec<u8>,
     pub regions: Vec<Region>,
     pub tensors: Vec<Tensor>,
+    /// The CPU code, an AArch64 shared object, if the model has CPU
+    /// sections (format minor 1).
+    pub cpu_code: Option<Vec<u8>>,
+    /// The CPU steps, in order; empty without CPU sections.
+    pub cpu_steps: Vec<CpuStep>,
 }
 
 fn bad(msg: impl Into<String>) -> Error {
@@ -88,9 +128,87 @@ fn u32_at(d: &[u8], at: usize) -> u32 {
     u32::from_le_bytes(d[at..at + 4].try_into().unwrap())
 }
 
+/// The ELF header of CPU_CODE (docs/model-format.md 9).
+fn check_elf(code: &[u8]) -> Result<()> {
+    check(
+        code.len() >= ELF_HEADER_SIZE && code.starts_with(b"\x7fELF"),
+        "CPU_CODE is not an ELF file",
+    )?;
+    check(code[4] == 2 && code[5] == 1, "CPU_CODE is not 64-bit little-endian ELF")?;
+    check(u16_at(code, 16) == ET_DYN, "CPU_CODE is not a shared object")?;
+    check(u16_at(code, 18) == EM_AARCH64, "CPU_CODE is not for AArch64")
+}
+
+fn is_c_identifier(name: &[u8]) -> bool {
+    name.first().is_some_and(|c| !c.is_ascii_digit())
+        && name.iter().all(|&c| c.is_ascii_alphanumeric() || c == b'_')
+}
+
+/// The steps of CPU_STEPS (docs/model-format.md 10), whose copies must be
+/// inside arena regions.
+fn parse_steps(body: &[u8], regions: &[Region]) -> Result<Vec<CpuStep>> {
+    check(body.len() >= STEPS_HEADER, "CPU_STEPS is smaller than its header")?;
+    let count = u32_at(body, 0) as usize;
+    check(body[4..STEPS_HEADER].iter().all(|&b| b == 0), "reserved CPU_STEPS bytes are not 0")?;
+    check(count >= 1, "no CPU steps")?;
+    let names_at = STEPS_HEADER + STEP_ENTRY * count;
+    check(body.len() > names_at, "CPU_STEPS has no name table")?;
+    let names = &body[names_at..];
+    check(names.last() == Some(&0), "the name table does not end with NUL")?;
+    let mut steps = Vec::new();
+    for i in 0..count {
+        let e = &body[STEPS_HEADER + STEP_ENTRY * i..][..STEP_ENTRY];
+        let kind = match e[0] {
+            0 => StepKind::CopyIn,
+            1 => StepKind::Call,
+            2 => StepKind::CopyOut,
+            k => return Err(bad(format!("step {i}: bad kind {k}"))),
+        };
+        let (region, name, offset, size) =
+            (u32::from(e[1]), u32_at(e, 4) as usize, u32_at(e, 8), u32_at(e, 12));
+        check(u16_at(e, 2) == 0, &format!("step {i}: reserved field is not 0"))?;
+        check(name < names.len(), &format!("step {i}: name outside the name table"))?;
+        // The table ends with NUL, so every name does
+        let len = names[name..].iter().position(|&b| b == 0).unwrap();
+        let symbol = &names[name..name + len];
+        check(
+            is_c_identifier(symbol),
+            &format!(
+                "step {i}: name {:?} is not a C identifier",
+                String::from_utf8_lossy(symbol)
+            ),
+        )?;
+        if kind == StepKind::Call {
+            check(
+                region == 0 && offset == 0 && size == 0,
+                &format!("step {i}: a call has region, offset and size 0"),
+            )?;
+        } else {
+            let r = regions.iter().find(|r| r.index == region);
+            check(
+                r.is_some_and(|r| r.role == RegionRole::Arena),
+                &format!("step {i}: not in an arena region"),
+            )?;
+            check(
+                size >= 1 && u64::from(offset) + u64::from(size) <= u64::from(r.unwrap().size),
+                &format!("step {i}: copy outside its region"),
+            )?;
+        }
+        steps.push(CpuStep {
+            kind,
+            region,
+            // ASCII, as a C identifier
+            name: String::from_utf8(symbol.to_vec()).unwrap(),
+            offset,
+            size,
+        });
+    }
+    Ok(steps)
+}
+
 impl Model {
     /// Parses model.knpu bytes and checks the rules of docs/model-format.md
-    /// 9 that do not depend on the device.
+    /// 11 that depend neither on the device nor on the loaded CPU code.
     pub fn parse(data: &[u8]) -> Result<Model> {
         check(data.len() > HEADER_SIZE, "the file is not larger than the header")?;
         check(&data[0..4] == MAGIC, "bad magic (not a model.knpu file)")?;
@@ -129,7 +247,7 @@ impl Model {
             );
             check(u32_at(data, at + 12) == 0, &format!("section {i}: reserved field is not 0"))?;
             check(
-                (KIND_CMDS..=KIND_TENSORS).contains(&kind),
+                (KIND_CMDS..=KIND_CPU_STEPS).contains(&kind),
                 &format!("section {i}: unknown kind {kind}"),
             )?;
             check(off % 16 == 0, &format!("section {i}: offset not 16-byte aligned"))?;
@@ -155,6 +273,15 @@ impl Model {
             count(KIND_CMDS) == 1 && count(KIND_REGIONS) == 1 && count(KIND_TENSORS) == 1,
             "need exactly one CMDS, REGIONS and TENSORS section",
         )?;
+        // CPU_CODE and CPU_STEPS come together (format 4), with minor 1
+        // (format 11, rule 6)
+        let cpu = count(KIND_CPU_CODE);
+        check(
+            cpu == count(KIND_CPU_STEPS) && cpu <= 1,
+            "need both or none of CPU_CODE and CPU_STEPS, at most one each",
+        )?;
+        let format_minor = u16_at(data, 6);
+        check(cpu == 0 || format_minor >= 1, "CPU sections need format_minor 1")?;
         let body = |k| sections.iter().find(|(kind, _)| *kind == k).unwrap().1;
 
         // CMDS (format 5)
@@ -280,13 +407,24 @@ impl Model {
             }
         }
 
+        // CPU_CODE and CPU_STEPS (format 9 and 10)
+        let (cpu_code, cpu_steps) = if cpu == 1 {
+            let code = body(KIND_CPU_CODE);
+            check_elf(code)?;
+            (Some(code.to_vec()), parse_steps(body(KIND_CPU_STEPS), &regions)?)
+        } else {
+            (None, Vec::new())
+        };
+
         Ok(Model {
-            format_minor: u16_at(data, 6),
+            format_minor,
             sram_size,
             spec_major: u16_at(data, 12),
             cmds: cmds.to_vec(),
             regions,
             tensors,
+            cpu_code,
+            cpu_steps,
         })
     }
 

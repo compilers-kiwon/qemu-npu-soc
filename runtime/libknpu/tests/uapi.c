@@ -6,8 +6,11 @@
  * SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
  */
 
-#define _POSIX_C_SOURCE 200809L
+/* memfd_create's flags, dladdr1 and Dl_info are GNU extensions */
+#define _GNU_SOURCE
 
+#include <dlfcn.h>
+#include <elf.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <sys/ioctl.h>
@@ -19,6 +22,9 @@
 
 #define SIZE(t) printf("size %s %zu\n", #t, sizeof(struct t))
 #define OFFSET(t, f) printf("offset %s.%s %zu\n", #t, #f, offsetof(struct t, f))
+/* The same for a typedef name */
+#define TSIZE(t) printf("size %s %zu\n", #t, sizeof(t))
+#define TOFFSET(t, f) printf("offset %s.%s %zu\n", #t, #f, offsetof(t, f))
 #define VALUE(n) printf("value %s %llu\n", #n, (unsigned long long)(n))
 
 int main(void)
@@ -83,5 +89,22 @@ int main(void)
 	SIZE(timespec);
 	OFFSET(timespec, tv_nsec);
 	printf("size off_t %zu\n", sizeof(off_t));
+
+	VALUE(MFD_CLOEXEC);
+	VALUE(RTLD_NOW);
+	VALUE(RTLD_LOCAL);
+	VALUE(RTLD_DL_SYMENT);
+	VALUE(STT_OBJECT);
+	VALUE(STT_FUNC);
+	TSIZE(Dl_info);
+	TOFFSET(Dl_info, dli_fbase);
+	TOFFSET(Dl_info, dli_sname);
+	TOFFSET(Dl_info, dli_saddr);
+	TSIZE(Elf64_Sym);
+	TOFFSET(Elf64_Sym, st_info);
+	TOFFSET(Elf64_Sym, st_other);
+	TOFFSET(Elf64_Sym, st_shndx);
+	TOFFSET(Elf64_Sym, st_value);
+	TOFFSET(Elf64_Sym, st_size);
 	return 0;
 }

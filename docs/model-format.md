@@ -150,6 +150,9 @@
 - `CPU_STEPS`가 가리키는 함수와 배열을 동적 기호로 내보낸다. 함수는 인자와
   반환값이 없고(`void f(void)`), 배열은 int8 원소다.
 - 텍스트 재배치(`DT_TEXTREL`)가 없다.
+- `DT_FLAGS`에 `DF_SYMBOLIC`이 있다. 자기가 정의한 기호의 참조를 자기 정의에
+  묶으므로(`ld.lld -Bsymbolic`), 런타임 프로세스에 같은 이름의 기호가 있어도
+  층 함수는 `COPY_IN`이 복사해 넣은 배열을 읽는다.
 
 ## 10. `CPU_STEPS`: CPU 단계
 
@@ -211,6 +214,7 @@ NPU 작업이 끝난 뒤 런타임이 표 순서대로 할 단계와 그 기호 
    `CONST` 섹션을 복사한다.
 2. CPU 섹션이 있으면 `CPU_CODE`를 `memfd_create`로 만든 파일에 써서
    `dlopen`하고, `CPU_STEPS`의 기호를 `dlsym`으로 찾아 11절 7번을 검사한다.
+   memfd는 공유 객체를 내릴 때까지 닫지 않는다(설계 10절).
 3. 입력 텐서를 그 arena 버퍼의 `offset`에 복사한다.
 4. `CMDS`로 명령열을 만들고(`KNPU_CMDSTREAM_CREATE`), 영역 버퍼를 붙여
    제출한다(`KNPU_SUBMIT`).

@@ -6,9 +6,13 @@
 //! [`Model::parse`] reads and checks a model.knpu file
 //! (docs/model-format.md), [`Device::open`] opens the knpu accel device,
 //! [`Device::load`] creates the region buffers and the command stream of a
-//! model, and [`Loaded::run`] runs one inference and returns the output
+//! model ([`Device::load_with_cpu_code`], which is unsafe, also loads the
+//! CPU code of a model that has it), and [`Loaded::run`] runs one
+//! inference, the NPU job and then the CPU steps, and returns the output
 //! with the job's performance counters.
 
+#[doc(hidden)]
+pub mod cpu;
 mod device;
 mod model;
 #[doc(hidden)]
@@ -17,7 +21,7 @@ pub mod sys;
 pub mod uapi;
 
 pub use device::{Counters, Device, DeviceInfo, Loaded, Output};
-pub use model::{Direction, Model, Region, RegionRole, Tensor};
+pub use model::{CpuStep, Direction, Model, Region, RegionRole, StepKind, Tensor};
 
 use std::fmt;
 use std::io;
@@ -25,9 +29,12 @@ use std::io;
 /// Errors of the runtime.
 #[derive(Debug)]
 pub enum Error {
-    /// The model file breaks a rule of docs/model-format.md.
+    /// The model file breaks a rule of docs/model-format.md, its CPU code
+    /// included.
     Model(String),
-    /// The model does not fit the device, or the data does not fit the model.
+    /// The model does not fit the device or the way it is loaded (CPU code
+    /// needs Device::load_with_cpu_code), or the data does not fit the
+    /// model.
     Mismatch(String),
     /// A system call failed.
     Io { what: String, source: io::Error },

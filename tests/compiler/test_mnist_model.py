@@ -34,7 +34,8 @@ compiled model:
 8. V3 of the whole model: knpu-compile turns lcc's output of the full C into
    model.knpu with the softmax layer as CPU code (format minor 1), for both
    SRAM sizes. Two compiles give the same bytes; the shared object exports
-   the functions and arrays of the CPU steps and has no text relocations.
+   the functions and arrays of the CPU steps, binds its own symbols
+   (DF_SYMBOLIC) and has no text relocations.
    knpu_run runs the NPU part, which leaves V2's logits in the arena, and
    cpu_run, an aarch64 program on qemu-aarch64 user mode, loads the CPU
    code as the runtime does and runs the CPU steps on that arena: the
@@ -82,7 +83,7 @@ CMD_PAYLOAD, SPACE_SRAM = 0x4000, 1
 # ELF (the CPU code)
 SHT_DYNAMIC, SHT_DYNSYM = 6, 11
 STT_OBJECT, STT_FUNC = 1, 2
-DT_TEXTREL, DT_FLAGS, DF_TEXTREL = 22, 30, 0x4
+DT_TEXTREL, DT_FLAGS, DF_SYMBOLIC, DF_TEXTREL = 22, 30, 0x2, 0x4
 
 
 class Checker:
@@ -187,12 +188,13 @@ def stream_counters(model):
 
 def elf_exports(code):
     """The defined dynamic symbols of a 64-bit little-endian ELF shared
-    object as {name: (type, size)}, and whether it has text relocations."""
+    object as {name: (type, size)}, whether it has text relocations and
+    whether it binds its own symbols (DF_SYMBOLIC)."""
     shoff, = struct.unpack_from("<Q", code, 0x28)
     shentsize, shnum = struct.unpack_from("<HH", code, 0x3A)
     sections = [struct.unpack_from("<IIQQQQIIQQ", code, shoff + i * shentsize)
                 for i in range(shnum)]
-    exports, textrel = {}, False
+    exports, textrel, symbolic = {}, False, False
     for _, sh_type, _, _, offset, size, link, _, _, entsize in sections:
         if sh_type == SHT_DYNSYM:
             names = sections[link][4]
@@ -208,7 +210,8 @@ def elf_exports(code):
                 tag, value = struct.unpack_from("<qQ", code, at)
                 textrel |= tag == DT_TEXTREL or (tag == DT_FLAGS and
                                                  bool(value & DF_TEXTREL))
-    return exports, textrel
+                symbolic |= tag == DT_FLAGS and bool(value & DF_SYMBOLIC)
+    return exports, textrel, symbolic
 
 
 def top1(data):
@@ -393,13 +396,15 @@ def main():
             model = model_file.read(data)
             c.check(model.format_minor == 1 and model.cpu_code is not None,
                     f"{tag}: no CPU sections")
-            exports, textrel = elf_exports(model.cpu_code)
+            exports, textrel, symbolic = elf_exports(model.cpu_code)
             for s in model.cpu_steps:
                 got = exports.get(s.name, (None, 0))
                 c.check(got[0] == STT_FUNC if s.kind == "call"
                         else got == (STT_OBJECT, s.size),
                         f"{tag}: the CPU code exports {s.name} as {got}")
             c.check(not textrel, f"{tag}: the CPU code has text relocations")
+            c.check(symbolic, f"{tag}: the CPU code does not bind its own "
+                    "symbols (no DF_SYMBOLIC)")
             logits = next(s for s in model.cpu_steps if s.kind == "copy_in")
             out = next(t for t in model.tensors if t.direction == "output")
             for n, inp in zip(names, inputs):

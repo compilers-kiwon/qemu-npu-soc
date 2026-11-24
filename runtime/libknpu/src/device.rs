@@ -2,15 +2,17 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 //! The knpu accel device: buffers, command streams, jobs and performance
-//! monitors (linux/include/uapi/drm/knpu_accel.h).
+//! monitors (linux/include/uapi/drm/knpu_accel.h), and the CPU steps of a
+//! model after its jobs (cpu.rs).
 
 use std::ffi::{c_ulong, c_void};
 use std::fs::{File, OpenOptions};
 use std::io;
 use std::os::fd::AsRawFd;
 use std::path::Path;
-use std::ptr;
+use std::{ptr, slice};
 
+use crate::cpu::CpuCode;
 use crate::model::{Model, RegionRole, Tensor};
 use crate::{Error, Result, sys, uapi};
 
@@ -102,8 +104,32 @@ impl Device {
     }
 
     /// Creates the region buffers (constant regions filled in) and the
-    /// command stream of a model. The kernel validates the stream here.
+    /// command stream of a model without CPU code. The kernel validates the
+    /// stream here. A model with CPU sections needs
+    /// [`Device::load_with_cpu_code`].
     pub fn load(&self, model: &Model) -> Result<Loaded<'_>> {
+        if model.cpu_code.is_some() {
+            return Err(Error::Mismatch(
+                "the model has CPU code, which runs in this process; \
+                 load it with Device::load_with_cpu_code"
+                    .to_string(),
+            ));
+        }
+        // SAFETY: the model has no CPU code
+        unsafe { self.load_with_cpu_code(model) }
+    }
+
+    /// Like [`Device::load`], and also loads the CPU code of the model, if
+    /// it has any (docs/model-format.md 12, step 2): its CPU steps then run
+    /// after every NPU job.
+    ///
+    /// # Safety
+    ///
+    /// The CPU code runs in this process: its initialisation routines here,
+    /// its layer functions on every [`Loaded::run`]. Nothing checks what it
+    /// does (docs/model-format.md 11), so the model file must be trusted
+    /// like an executable.
+    pub unsafe fn load_with_cpu_code(&self, model: &Model) -> Result<Loaded<'_>> {
         model.check_device(&self.info)?;
         let input = model.input()?.clone();
         let output = model.output()?.clone();
@@ -117,6 +143,12 @@ impl Device {
             regions.push((r.index, buf));
         }
 
+        let cpu = match &model.cpu_code {
+            // SAFETY: the caller trusts the CPU code
+            Some(code) => Some(unsafe { CpuCode::load(code, &model.cpu_steps) }?),
+            None => None,
+        };
+
         let mut args = uapi::CmdstreamCreate {
             size: model.cmds.len() as u32,
             data: model.cmds.as_ptr() as u64,
@@ -125,7 +157,7 @@ impl Device {
         self.ioctl(uapi::DRM_IOCTL_KNPU_CMDSTREAM_CREATE, &mut args, "KNPU_CMDSTREAM_CREATE")?;
         let cmdstream = Handle { dev: self, handle: args.handle };
 
-        Ok(Loaded { dev: self, regions, cmdstream, input, output })
+        Ok(Loaded { dev: self, regions, cmdstream, input, output, cpu })
     }
 
     fn ioctl<T>(&self, request: u64, arg: &mut T, what: &str) -> Result<()> {
@@ -218,6 +250,14 @@ impl Buffer<'_> {
         unsafe { ptr::copy_nonoverlapping(self.ptr.add(offset), out.as_mut_ptr(), len) }
         out
     }
+
+    /// The whole mapping, for the CPU steps; only between jobs, when the
+    /// device does not use the buffer.
+    fn bytes_mut(&mut self) -> &mut [u8] {
+        // SAFETY: the mapping is len bytes and lives as long as self, and
+        // &mut self keeps out every other access from this process
+        unsafe { slice::from_raw_parts_mut(self.ptr, self.len) }
+    }
 }
 
 impl Drop for Buffer<'_> {
@@ -235,11 +275,14 @@ pub struct Loaded<'d> {
     cmdstream: Handle<'d>,
     input: Tensor,
     output: Tensor,
+    /// The CPU code and steps (Device::load_with_cpu_code).
+    cpu: Option<CpuCode>,
 }
 
 impl Loaded<'_> {
     /// Runs one inference: copies the input into the arena, submits the job
-    /// with a performance monitor, waits and returns the output.
+    /// with a performance monitor, waits, runs the CPU steps if the model
+    /// has any and returns the output.
     pub fn run(&mut self, input: &[u8]) -> Result<Output> {
         if input.len() != self.input.size as usize {
             return Err(Error::Mismatch(format!(
@@ -265,9 +308,8 @@ impl Loaded<'_> {
         }
         dev.ioctl(uapi::DRM_IOCTL_KNPU_SUBMIT, &mut submit, "KNPU_SUBMIT")?;
 
-        let out = self.buffer(self.output.region);
         let mut wait = uapi::BoWait {
-            handle: out.handle.handle,
+            handle: self.buffer(self.output.region).handle.handle,
             timeout_ns: monotonic_ns()? + WAIT_NS,
             ..Default::default()
         };
@@ -289,6 +331,14 @@ impl Loaded<'_> {
         };
         dev.ioctl(uapi::DRM_IOCTL_KNPU_PERFMON_GET_VALUES, &mut get, "KNPU_PERFMON_GET_VALUES")?;
 
+        // The CPU steps, after the job (docs/model-format.md 12, step 5)
+        if let Some(cpu) = &self.cpu {
+            let mut regions: Vec<(u32, &mut [u8])> =
+                self.regions.iter_mut().map(|(index, buf)| (*index, buf.bytes_mut())).collect();
+            cpu.run(&mut regions);
+        }
+
+        let out = self.buffer(self.output.region);
         Ok(Output {
             data: out.read(self.output.offset as usize, self.output.size as usize),
             counters: Counters {

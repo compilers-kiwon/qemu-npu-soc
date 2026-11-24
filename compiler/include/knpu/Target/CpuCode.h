@@ -28,8 +28,8 @@ struct CpuTools {
 /// Compiles the CPU module into an AArch64 shared object in a temporary
 /// directory: lcc-opt --lcc-to-linalg --lcc-lower --emit-bytecode,
 /// mlir-translate --mlir-to-llvmir, clang --target=aarch64-linux-gnu -O2
-/// -fPIC -c and ld.lld -shared. Returns the bytes of the shared object;
-/// errors are reported at the module.
+/// -fPIC -c and ld.lld -shared -Bsymbolic. Returns the bytes of the shared
+/// object; errors are reported at the module.
 FailureOr<std::vector<char>> compileCpuModule(ModuleOp cpu,
                                               const CpuTools &tools);
 

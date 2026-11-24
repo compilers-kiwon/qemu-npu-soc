@@ -127,8 +127,11 @@ mlir::knpu::compileCpuModule(ModuleOp cpu, const CpuTools &tools) {
       failed(runTool(cpu, "clang", tools.clang,
                      {"--target=aarch64-linux-gnu", "-O2", "-fPIC", "-c", ir,
                       "-o", object})) ||
+      // -Bsymbolic binds the object's references to its own definitions,
+      // so a program with symbols of the same names cannot take over the
+      // arrays of the CPU steps (docs/model-format.md 9)
       failed(runTool(cpu, "ld.lld", tools.ldLld,
-                     {"-shared", object, "-o", shared})))
+                     {"-shared", "-Bsymbolic", object, "-o", shared})))
     return failure();
 
   auto buffer = llvm::MemoryBuffer::getFile(shared, /*IsText=*/false,

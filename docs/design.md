@@ -807,10 +807,13 @@ MLIR의 `mlir/examples/standalone`과 같은 구성을 가진 트리 밖 MLIR
   CPU 층이 있으면 그 함수와 그것이 쓰는 전역만 남긴 CPU 모듈을 MLIR bytecode로
   써서 `lcc-opt --lcc-to-linalg --lcc-lower --emit-bytecode`,
   `mlir-translate --mlir-to-llvmir`,
-  `clang --target=aarch64-linux-gnu -O2 -fPIC -c`, `ld.lld -shared`를 차례로
-  부르고, 결과를 `knpu.cpu_code`로 넣는다. 도구 경로는 빌드할 때 CMake가 찾은
-  것이 기본값이다. `--report`는 추정 사이클을 층마다와 전체로 찍고,
-  `--overlap=false`는 비교용 직렬 스케줄로 컴파일한다.
+  `clang --target=aarch64-linux-gnu -O2 -fPIC -c`, `ld.lld -shared -Bsymbolic`을
+  차례로 부르고, 결과를 `knpu.cpu_code`로 넣는다. `-Bsymbolic`은 공유 객체
+  안의 기호 참조를 링크할 때 자기 정의에 묶는다. 그래서 런타임 프로세스에 같은
+  이름의 기호가 있어도 층 함수는 단계가 복사해 넣은 자기 배열을 읽는다(형식
+  9절). 도구 경로는 빌드할 때 CMake가 찾은 것이 기본값이다. `--report`는 추정
+  사이클을 층마다와 전체로 찍고, `--overlap=false`는 비교용 직렬 스케줄로
+  컴파일한다.
 
 lcc는 저장소에 넣지 않는다(12.4절). `compiler/` CMake가 고정 태그의 릴리스
 압축을 sha256으로 확인하며 내려받는다. 게스트가 AArch64이므로 aarch64용 mlir
@@ -866,9 +869,19 @@ CPU 섹션 둘은 형식 minor 1에서 더했다. CPU 층이 있는 모델만 �
   `memfd_create`로 만든 파일에 써서 `dlopen`하고 단계 표의 함수와 배열을
   `dlsym`으로 찾는다. 찾은 기호는 `dladdr1`로 동적 기호 표의 값을 읽어,
   부를 것은 함수이고 복사할 것은 크기가 단계와 같은 객체인지 확인한다(형식
-  11절 7번). 실행할 때마다 NPU 작업이 끝난 뒤 단계 표대로 arena의
+  11절 7번). memfd는 공유 객체를 내릴 때까지 닫지 않는다. glibc의 `dlopen`은
+  경로 이름이 같은 객체가 이미 올라 있으면 그 객체를 돌려주므로, 닫은 번호를
+  다음 모델의 memfd가 받으면 같은 `/proc/self/fd/N`으로 앞 모델의 코드가
+  돌아온다. 실행할 때마다 NPU 작업이 끝난 뒤 단계 표대로 arena의
   텐서를 공유 객체의 배열로 복사하고, 층 함수를 부르고, 결과를 arena의 출력
   자리로 복사한다. 그래서 출력은 CPU 층이 있든 없든 arena에서 꺼낸다.
+- CPU 코드는 이 프로세스 안에서 돌고 아무도 검사하지 않으므로(4절), 그것을
+  올리는 메서드는 `unsafe`다. `Device::load`는 CPU 섹션이 없는 모델만 올리고,
+  `unsafe`인 `Device::load_with_cpu_code`는 모든 모델을 올리되 모델 파일을
+  실행 파일처럼 믿을 수 있다는 조건을 부르는 쪽이 책임진다. 공유 라이브러리를
+  올리는 Rust 크레이트(libloading의 `Library::new`)와 같은 관례다.
+  `knpu-infer`는 받은 모델 파일을 실행 파일처럼 돌리는 도구이므로 이 메서드를
+  쓴다.
 - `knpu-infer`(바이너리): `knpu-infer [--device PATH] MODEL INPUT
   [--expect FILE] [--output FILE]`. 모델 요약과 카운터(`macs`,
   `dma_rd_bytes`, `dma_wr_bytes`, `ops`)를 찍고, `--expect`가 있으면 출력을
@@ -893,8 +906,10 @@ CPU 섹션 둘은 형식 minor 1에서 더했다. CPU 층이 있는 모델만 �
   넣는다. 그래서 부팅한 보드에서 바로 `knpu-infer`를 돌릴 수 있다. 이
   파일들은 컴파일러와 V2가 만든 것을 커밋한 것이고, push CI의 V3가 지금 만든
   것과 같은지 검사한다.
-- 호스트 시험(`cargo test`)은 CPU 섹션의 파싱과 검사까지 한다. aarch64 코드는
-  V3(qemu-user)와 V6(kn1-evb)이 돌린다.
+- 호스트 시험(`cargo test`)은 CPU 섹션의 파싱과 검사까지 한다. 올리기(memfd,
+  `dlopen`, `dladdr1`), 형식 11절 7번, 단계 실행은 호스트 `cc`로 만든 시험 공유
+  객체로 본다. 이 시험은 AArch64 검사(파싱)를 거치지 않고 로더를 직접 부른다.
+  aarch64 코드는 V3(qemu-user)와 V6(kn1-evb)이 돌린다.
 
 ---
 
@@ -910,9 +925,10 @@ CPU 섹션 둘은 형식 minor 1에서 더했다. CPU 층이 있는 모델만 �
 | V6 | 끝-끝: kn1-evb를 부팅해 MNIST CNN과 ResNet-8을 돌리고, V2와 비교하고, 카운터를 보고 | QEMU |
 
 CI(D42, GitHub Actions): push마다 V2~V4와 런타임의 호스트 시험(`cargo
-test`: 모델 파싱과 검사, UAPI 대조, `knpu-infer` 인자)을 돌리고, 매일 밤과
-수동 실행 때 Buildroot 전체 빌드와 V1, V5, V6을 돌린다. V3의 CPU 부분을 위해
-push CI는 aarch64 교차 gcc와 qemu-user도 설치한다. 바인딩과 DT의
+test`: 모델 파싱과 검사, 시험 공유 객체로 CPU 코드 올리기와 단계 실행, UAPI
+대조, `knpu-infer` 인자)을 돌리고, 매일 밤과 수동 실행 때 Buildroot 전체
+빌드와 V1, V5, V6을 돌린다. V3의 CPU 부분을 위해 push CI는 aarch64 교차
+gcc와 qemu-user도 설치한다. 바인딩과 DT의
 스키마 검사(`tests/dt/check-dt.sh`)도 push마다 돈다. 야간 작업은 전체 빌드,
 부팅 스모크 시험(`tests/boot/`, M1.2 완료 조건), V1(`tests/qemu/run-v1.sh`),
 V5(`tests/driver/kn1_v5_test.py`), V6(`tests/e2e/kn1_v6_test.py`)을 돌린다.

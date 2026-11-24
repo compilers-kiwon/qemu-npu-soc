@@ -108,6 +108,22 @@ fn layout_and_numbers_match_the_c_headers() {
         "size timespec" => size_of::<sys::Timespec>(),
         "offset timespec.tv_nsec" => offset_of!(sys::Timespec, tv_nsec),
         "size off_t" => size_of::<sys::OffT>(),
+        "value MFD_CLOEXEC" => sys::MFD_CLOEXEC,
+        "value RTLD_NOW" => sys::RTLD_NOW,
+        "value RTLD_LOCAL" => sys::RTLD_LOCAL,
+        "value RTLD_DL_SYMENT" => sys::RTLD_DL_SYMENT,
+        "value STT_OBJECT" => sys::STT_OBJECT,
+        "value STT_FUNC" => sys::STT_FUNC,
+        "size Dl_info" => size_of::<sys::DlInfo>(),
+        "offset Dl_info.dli_fbase" => offset_of!(sys::DlInfo, dli_fbase),
+        "offset Dl_info.dli_sname" => offset_of!(sys::DlInfo, dli_sname),
+        "offset Dl_info.dli_saddr" => offset_of!(sys::DlInfo, dli_saddr),
+        "size Elf64_Sym" => size_of::<sys::Elf64Sym>(),
+        "offset Elf64_Sym.st_info" => offset_of!(sys::Elf64Sym, st_info),
+        "offset Elf64_Sym.st_other" => offset_of!(sys::Elf64Sym, st_other),
+        "offset Elf64_Sym.st_shndx" => offset_of!(sys::Elf64Sym, st_shndx),
+        "offset Elf64_Sym.st_value" => offset_of!(sys::Elf64Sym, st_value),
+        "offset Elf64_Sym.st_size" => offset_of!(sys::Elf64Sym, st_size),
     };
     let c = c_values();
     for (key, value) in &c {
