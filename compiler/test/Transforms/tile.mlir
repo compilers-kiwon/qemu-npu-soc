@@ -158,3 +158,46 @@ func.func @fc_too_big(%in: tensor<1x1x1x4096xi8>, %w: tensor<2x1x1x4096xi8>,
 
 // BIG-LABEL: func.func @fc_too_big
 // BIG-NOT: tensor.extract_slice
+
+// -----
+
+// An addition of two 16x16x8 tensors (2,048 bytes each) is split into tiles
+// of the same rows of both inputs and the output: two buffers of each, 640
+// bytes for five rows, with overlap; one of each, 1,280 bytes for ten rows,
+// without.
+
+func.func @add(%a: tensor<1x16x16x8xi8>, %b: tensor<1x16x16x8xi8>)
+    -> tensor<1x16x16x8xi8> {
+  %0 = knpu.add %a, %b {input_zp = 0 : i64, input2_zp = 0 : i64,
+      output_zp = 0 : i64, input_scale = array<i64: 1073741824, 0>,
+      input2_scale = array<i64: 1073741824, 0>,
+      output_scale = array<i64: 1073741824, -19>,
+      clamp = array<i64: -128, 127>, round = "double"}
+      : (tensor<1x16x16x8xi8>, tensor<1x16x16x8xi8>) -> tensor<1x16x16x8xi8>
+  return %0 : tensor<1x16x16x8xi8>
+}
+
+// BIG-LABEL: func.func @add
+// BIG-NOT: tensor.extract_slice
+// BIG: knpu.add %arg0, %arg1
+
+// SMALL-LABEL: func.func @add
+// SMALL: %[[E:.*]] = tensor.empty() : tensor<1x16x16x8xi8>
+// SMALL: %[[A0:.*]] = tensor.extract_slice %arg0[0, 0, 0, 0] [1, 5, 16, 8] [1, 1, 1, 1]
+// SMALL: %[[B0:.*]] = tensor.extract_slice %arg1[0, 0, 0, 0] [1, 5, 16, 8] [1, 1, 1, 1]
+// SMALL: %[[T0:.*]] = knpu.add %[[A0]], %[[B0]] {{.*}} -> tensor<1x5x16x8xi8>
+// SMALL: tensor.insert_slice %[[T0]] into %[[E]][0, 0, 0, 0] [1, 5, 16, 8]
+// SMALL: tensor.extract_slice %arg0[0, 5, 0, 0] [1, 5, 16, 8]
+// SMALL: tensor.extract_slice %arg0[0, 10, 0, 0] [1, 5, 16, 8]
+// SMALL: tensor.extract_slice %arg0[0, 15, 0, 0] [1, 1, 16, 8]
+// SMALL: tensor.extract_slice %arg1[0, 15, 0, 0] [1, 1, 16, 8]
+// SMALL: knpu.add {{.*}} -> tensor<1x1x16x8xi8>
+// SMALL: tensor.insert_slice {{.*}}[0, 15, 0, 0] [1, 1, 16, 8]
+// SMALL-NOT: knpu.add
+// SMALL: return
+
+// SERIAL-LABEL: func.func @add
+// SERIAL: knpu.add {{.*}} -> tensor<1x10x16x8xi8>
+// SERIAL: knpu.add {{.*}} -> tensor<1x6x16x8xi8>
+// SERIAL-NOT: knpu.add
+// SERIAL: return

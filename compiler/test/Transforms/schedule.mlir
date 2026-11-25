@@ -444,8 +444,10 @@ func.func @knpu_model(
 
 // -----
 
-// An add needs its two inputs and its output in SRAM at once (3 x 2,048
-// bytes here), and knpu-tile does not split adds yet.
+// An add whose inputs and output (3 x 2,048 bytes) do not fit in 4 KiB is
+// split by knpu-tile into tiles of the same rows of both inputs and the
+// output: 10 rows with overlap, the next tile's inputs loaded in front of
+// the current tile's addition; 21 rows without.
 
 func.func @knpu_model(
     %in: tensor<1x32x32x2xi8> {knpu.scale = 1.0 : f32, knpu.zero_point = 0 : i64})
@@ -458,7 +460,6 @@ func.func @knpu_model(
       clamp = array<i64: -128, 127>, round = "double"}
       : (tensor<1x32x32x2xi8>, tensor<2x1x1x2xi8>, tensor<2xi32>,
          tensor<2x2xi32>) -> tensor<1x32x32x2xi8>
-  // ERR: needs 6144 bytes of SRAM but 4096 are given (knpu-tile does not split an add yet)
   %1 = knpu.add %in, %0 {input_zp = 0 : i64, input2_zp = 0 : i64,
       output_zp = 0 : i64, input_scale = array<i64: 1073741824, 0>,
       input2_scale = array<i64: 1073741824, 0>,
@@ -467,6 +468,26 @@ func.func @knpu_model(
       : (tensor<1x32x32x2xi8>, tensor<1x32x32x2xi8>) -> tensor<1x32x32x2xi8>
   return %1 : tensor<1x32x32x2xi8>
 }
+
+// CHECK-LABEL: module attributes {knpu.sram_size = 4096 : i64}
+// CHECK: knpu.io "output" region 1[4096] shape [1, 32, 32, 2]
+// CHECK: knpu.dma "store" region 1[3968] sram[1968] length 128
+// CHECK-NEXT: knpu.dma "load" region 1[0] sram[0] length 640
+// CHECK-NEXT: knpu.dma "load" region 1[2048] sram[1280] length 640
+// CHECK-NEXT: knpu.dma "load" region 1[640] sram[640] length 640
+// CHECK-NEXT: knpu.dma "load" region 1[2688] sram[1920] length 640
+// CHECK-NEXT: knpu.elementwise {{{.*}}ifm = 0 : i64, ifm2 = 1280 : i64{{.*}}ofm = 2560 : i64{{.*}}shape = array<i64: 10, 32, 2>}
+// CHECK-NEXT: knpu.dma "store" region 1[4096] sram[2560] length 640
+// CHECK-NEXT: knpu.dma "load" region 1[1280] sram[0] length 640
+// CHECK-NEXT: knpu.dma "load" region 1[3328] sram[1280] length 640
+// CHECK-NEXT: knpu.elementwise {{{.*}}ifm = 640 : i64, ifm2 = 1920 : i64{{.*}}ofm = 3200 : i64
+// CHECK: knpu.elementwise {{{.*}}shape = array<i64: 2, 32, 2>}
+// CHECK-NEXT: knpu.dma "store" region 1[6016] sram[3200] length 128
+// CHECK-NEXT: knpu.stop
+
+// SERIAL: knpu.io "output" region 1[4096] shape [1, 32, 32, 2]
+// SERIAL: knpu.elementwise {{{.*}}shape = array<i64: 21, 32, 2>}
+// SERIAL: knpu.elementwise {{{.*}}shape = array<i64: 11, 32, 2>}
 
 // -----
 

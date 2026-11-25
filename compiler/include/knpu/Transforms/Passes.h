@@ -28,15 +28,25 @@ inline int64_t convConstBytes(int64_t oc, int64_t kh, int64_t kw,
   return alignTo16(oc * kh * kw * ic) + alignTo16(4 * oc) + 8 * oc;
 }
 
-/// SRAM bytes a layer needs on its own: its constants (none for a pooling
-/// layer) followed by one input and one output buffer, or by two of each
-/// when its tiles are double-buffered. knpu-tile chooses tiles with this;
-/// knpu-schedule lays out a layer's buffers in the same order.
+/// SRAM bytes of the buffers a layer's tiles use at once: the constants and
+/// the input and output tiles, each 16-byte aligned and in as many copies as
+/// are in use at once (two when the next tile's are loaded while the current
+/// tile runs). knpu-tile chooses tiles with this; knpu-schedule lays out a
+/// layer's buffers in the same order and checks them against it.
+inline int64_t tileSramBytes(int64_t constBytes, int64_t constCopies,
+                             int64_t inBytes, int64_t inCopies,
+                             int64_t outBytes, int64_t outCopies) {
+  return constCopies * alignTo16(constBytes) + inCopies * alignTo16(inBytes) +
+         outCopies * alignTo16(outBytes);
+}
+
+/// SRAM bytes a layer of output-row tiles needs: its constants (none for a
+/// pooling layer) followed by one input and one output buffer, or by two of
+/// each when its tiles are double-buffered.
 inline int64_t layerSramBytes(int64_t constBytes, int64_t inBytes,
                               int64_t outBytes, bool doubleBuffered) {
   int64_t n = doubleBuffered ? 2 : 1;
-  return alignTo16(constBytes) + n * alignTo16(inBytes) +
-         n * alignTo16(outBytes);
+  return tileSramBytes(constBytes, 1, inBytes, n, outBytes, n);
 }
 
 /// Attributes knpu-estimate adds: (start, end) cycle of a DMA or operation

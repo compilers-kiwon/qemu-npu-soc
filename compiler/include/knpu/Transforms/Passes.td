@@ -32,16 +32,16 @@ def KnpuImport : Pass<"knpu-import", "::mlir::ModuleOp"> {
 }
 
 def KnpuTile : Pass<"knpu-tile", "::mlir::ModuleOp"> {
-  let summary = "Split convolutions and pooling into output-row tiles that "
-                "fit in SRAM";
+  let summary = "Split layers into output-row tiles that fit in SRAM";
   let description = [{
-    A layer whose constants, input and output fit in `sram-size` stays whole.
-    Otherwise its output rows are split into tiles so that the constants and
-    two input and two output buffers (double buffering) fit, or one of each
-    with `overlap=false`; every tile is a `knpu.conv2d` or `knpu.avgpool`
-    on a `tensor.extract_slice` of the input with its own padding, put
-    together with `tensor.insert_slice`. A layer with one output row, such
-    as a fully connected layer, is not split.
+    A layer whose constants, inputs and output fit in `sram-size` stays
+    whole. Otherwise its output rows are split into tiles so that the
+    constants and two buffers of each input and of the output (double
+    buffering) fit, or one of each with `overlap=false`; every tile is a
+    `knpu.conv2d`, `knpu.avgpool` or `knpu.add` on `tensor.extract_slice`s
+    of the inputs (an add reads the same rows of both) with its own padding,
+    put together with `tensor.insert_slice`. A layer with one output row,
+    such as a fully connected layer, is not split.
   }];
   let options = [
     Option<"sramSize", "sram-size", "int64_t", "65536",

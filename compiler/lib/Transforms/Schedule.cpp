@@ -472,9 +472,9 @@ void SchedulePass::runOnOperation() {
     if (need > sramSize) {
       l.tiles.front().op->emitOpError()
           << "needs " << need << " bytes of SRAM but "
-          << static_cast<int64_t>(sramSize) << " are given"
-          << (add ? " (knpu-tile does not split an add yet)"
-                  : " (run knpu-tile with the same sram-size and overlap)");
+          << static_cast<int64_t>(sramSize)
+          << " are given (run knpu-tile with the same sram-size and "
+             "overlap)";
       return signalPassFailure();
     }
   }
