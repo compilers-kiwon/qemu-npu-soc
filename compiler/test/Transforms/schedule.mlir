@@ -507,3 +507,117 @@ func.func @knpu_model(
       : (tensor<1x2x4x2xi8>, tensor<1x2x4x2xi8>) -> tensor<1x2x4x2xi8>
   return %0 : tensor<1x2x4x2xi8>
 }
+
+// -----
+
+// Output-channel tiles of six channels (see tile.mlir): the whole input
+// (at 1888) is loaded once; each tile's constants, the channel range of the
+// weights, bias and requantization table, are three DMAs into one of two
+// buffers (at 0 and 944), the next tile's in front of the current tile's
+// convolution; each output goes to its channels of the arena tensor with a
+// 2-D DMA of 64 rows of 6 bytes, 32 bytes apart. Serially the tiles have
+// thirteen channels and one buffer of each.
+
+func.func @knpu_model(
+    %in: tensor<1x8x8x16xi8> {knpu.scale = 1.0 : f32, knpu.zero_point = 0 : i64})
+    -> (tensor<1x8x8x32xi8> {knpu.scale = 1.0 : f32, knpu.zero_point = 0 : i64}) {
+  %w = arith.constant dense<1> : tensor<32x3x3x16xi8>
+  %b = arith.constant dense<0> : tensor<32xi32>
+  %rq = arith.constant dense<1073741824> : tensor<32x2xi32>
+  %0 = knpu.conv2d %in, %w, %b, %rq {stride = array<i64: 1, 1>,
+      pad = array<i64: 1, 1, 1, 1>, input_zp = 0 : i64,
+      output_zp = 0 : i64, clamp = array<i64: -128, 127>, round = "double"}
+      : (tensor<1x8x8x16xi8>, tensor<32x3x3x16xi8>, tensor<32xi32>,
+         tensor<32x2xi32>) -> tensor<1x8x8x32xi8>
+  return %0 : tensor<1x8x8x32xi8>
+}
+
+// CHECK-LABEL: module attributes {knpu.sram_size = 4096 : i64}
+// CHECK: knpu.region 0 "const" size 4992
+// CHECK: knpu.io "output" region 1[1024] shape [1, 8, 8, 32]
+// CHECK-LABEL: func.func @knpu_model() {
+// CHECK-NEXT: knpu.dma "load" region 0[0] sram[0] length 864
+// CHECK-NEXT: knpu.dma "load" region 0[4608] sram[864] length 24
+// CHECK-NEXT: knpu.dma "load" region 0[4736] sram[896] length 48
+// CHECK-NEXT: knpu.dma "load" region 1[0] sram[1888] length 1024
+// CHECK-NEXT: knpu.dma "load" region 0[864] sram[944] length 864
+// CHECK-NEXT: knpu.dma "load" region 0[4632] sram[1808] length 24
+// CHECK-NEXT: knpu.dma "load" region 0[4784] sram[1840] length 48
+// CHECK-NEXT: knpu.conv {bias = 864 : i64{{.*}}ifm = 1888 : i64{{.*}}ofm = 2912 : i64, ofm_shape = array<i64: 8, 8, 6>{{.*}}rq_table = 896 : i64{{.*}}weight = 0 : i64}
+// CHECK-NEXT: knpu.dma "store" region 1[1024] sram[2912] length 6 count 64 stride 32
+// CHECK-NEXT: knpu.dma "load" region 0[1728] sram[0] length 864
+// CHECK-NEXT: knpu.dma "load" region 0[4656] sram[864] length 24
+// CHECK-NEXT: knpu.dma "load" region 0[4832] sram[896] length 48
+// CHECK-NEXT: knpu.conv {bias = 1808 : i64{{.*}}ofm = 3296 : i64{{.*}}weight = 944 : i64}
+// CHECK-NEXT: knpu.dma "store" region 1[1030] sram[3296] length 6 count 64 stride 32
+// CHECK: knpu.dma "load" region 0[4320] sram[944] length 288
+// CHECK-NEXT: knpu.dma "load" region 0[4728] sram[1232] length 8
+// CHECK-NEXT: knpu.dma "load" region 0[4976] sram[1248] length 16
+// CHECK: knpu.conv {bias = 1232 : i64{{.*}}ofm_shape = array<i64: 8, 8, 2>{{.*}}rq_table = 1248 : i64{{.*}}weight = 944 : i64}
+// CHECK-NEXT: knpu.dma "store" region 1[1054] sram[3296] length 2 count 64 stride 32
+// CHECK-NEXT: knpu.stop
+
+// SERIAL: knpu.io "output" region 1[1024] shape [1, 8, 8, 32]
+// SERIAL: knpu.dma "load" region 0[0] sram[0] length 1872
+// SERIAL-NEXT: knpu.dma "load" region 0[4608] sram[1872] length 52
+// SERIAL-NEXT: knpu.dma "load" region 0[4736] sram[1936] length 104
+// SERIAL-NEXT: knpu.dma "load" region 1[0] sram[2048] length 1024
+// SERIAL-NEXT: knpu.conv {{{.*}}ofm_shape = array<i64: 8, 8, 13>
+// SERIAL-NEXT: knpu.dma "store" region 1[1024] sram[3072] length 13 count 64 stride 32
+// SERIAL-NEXT: knpu.dma "load" region 0[1872] sram[0] length 1872
+// SERIAL: knpu.dma "store" region 1[1050] sram[3072] length 6 count 64 stride 32
+// SERIAL-NEXT: knpu.stop
+
+// -----
+
+// Output-channel tiles on one-row tiles (see tile.mlir): the two tiles of a
+// row read its input, loaded once into one of two buffers (at 864 and
+// 2464), the next row's in front of the first tile's convolution; the
+// constants of the two channel ranges (two buffers, at 0 and 432) are
+// loaded again for every row. The six buffers fill the 4 KiB. Serially the
+// tiles are one-row tiles of all channels.
+
+func.func @knpu_model(
+    %in: tensor<1x3x8x200xi8> {knpu.scale = 1.0 : f32, knpu.zero_point = 0 : i64})
+    -> (tensor<1x3x8x4xi8> {knpu.scale = 1.0 : f32, knpu.zero_point = 0 : i64}) {
+  %w = arith.constant dense<1> : tensor<4x1x1x200xi8>
+  %b = arith.constant dense<0> : tensor<4xi32>
+  %rq = arith.constant dense<1073741824> : tensor<4x2xi32>
+  %0 = knpu.conv2d %in, %w, %b, %rq {stride = array<i64: 1, 1>,
+      pad = array<i64: 0, 0, 0, 0>, input_zp = 0 : i64,
+      output_zp = 0 : i64, clamp = array<i64: -128, 127>, round = "double"}
+      : (tensor<1x3x8x200xi8>, tensor<4x1x1x200xi8>, tensor<4xi32>,
+         tensor<4x2xi32>) -> tensor<1x3x8x4xi8>
+  return %0 : tensor<1x3x8x4xi8>
+}
+
+// CHECK-LABEL: module attributes {knpu.sram_size = 4096 : i64}
+// CHECK: knpu.region 1 "arena" size 4896
+// CHECK-LABEL: func.func @knpu_model() {
+// CHECK-NEXT: knpu.dma "load" region 0[0] sram[0] length 400
+// CHECK-NEXT: knpu.dma "load" region 0[800] sram[400] length 8
+// CHECK-NEXT: knpu.dma "load" region 0[816] sram[416] length 16
+// CHECK-NEXT: knpu.dma "load" region 1[0] sram[864] length 1600
+// CHECK-NEXT: knpu.dma "load" region 1[1600] sram[2464] length 1600
+// CHECK-NEXT: knpu.dma "load" region 0[400] sram[432] length 400
+// CHECK-NEXT: knpu.dma "load" region 0[808] sram[832] length 8
+// CHECK-NEXT: knpu.dma "load" region 0[832] sram[848] length 16
+// CHECK-NEXT: knpu.conv {{{.*}}ifm = 864 : i64{{.*}}ofm = 4064 : i64{{.*}}weight = 0 : i64}
+// CHECK-NEXT: knpu.dma "store" region 1[4800] sram[4064] length 2 count 8 stride 4
+// CHECK-NEXT: knpu.dma "load" region 0[0] sram[0] length 400
+// CHECK-NEXT: knpu.dma "load" region 0[800] sram[400] length 8
+// CHECK-NEXT: knpu.dma "load" region 0[816] sram[416] length 16
+// CHECK-NEXT: knpu.conv {{{.*}}ifm = 864 : i64{{.*}}ofm = 4080 : i64{{.*}}weight = 432 : i64}
+// CHECK-NEXT: knpu.dma "store" region 1[4802] sram[4080] length 2 count 8 stride 4
+// CHECK-NEXT: knpu.dma "load" region 1[3200] sram[864] length 1600
+// CHECK: knpu.conv {{{.*}}ifm = 2464 : i64{{.*}}weight = 0 : i64}
+// CHECK-NEXT: knpu.dma "store" region 1[4832] sram[4064] length 2 count 8 stride 4
+// CHECK: knpu.dma "store" region 1[4866] sram[4080] length 2 count 8 stride 4
+// CHECK-NEXT: knpu.stop
+
+// SERIAL: knpu.io "output" region 1[4800] shape [1, 3, 8, 4]
+// SERIAL: knpu.dma "load" region 0[0] sram[0] length 848
+// SERIAL-NEXT: knpu.dma "load" region 1[0] sram[848] length 1600
+// SERIAL-NEXT: knpu.conv {{{.*}}ofm_shape = array<i64: 1, 8, 4>
+// SERIAL-NEXT: knpu.dma "store" region 1[4800] sram[2448] length 32 count 1
+// SERIAL-NEXT: knpu.dma "load" region 1[1600] sram[848] length 1600

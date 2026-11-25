@@ -70,7 +70,9 @@ def KnpuSchedule : Pass<"knpu-schedule", "::mlir::ModuleOp"> {
     With `overlap` (the default) an activation that the next layers read
     whole stays in SRAM, the constants of the next layer that has constants
     are loaded while the current one runs, and the next tile's input is
-    loaded ahead of the current tile's operation.
+    loaded ahead of the current tile's operation. Output-channel tiles of
+    the same output rows read their input once, load the next tile's
+    constants ahead and write their outputs to the arena with 2-D DMAs.
     `overlap=false` gives the serial schedule to compare with: every layer
     and tile goes to the arena and back, one buffer each. Adds the
     `knpu.region`, `knpu.io` and `knpu.cpu_step` operations and the

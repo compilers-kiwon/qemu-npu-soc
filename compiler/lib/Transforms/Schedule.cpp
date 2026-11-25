@@ -18,9 +18,15 @@
 //   first operation and after its own loads.
 // - In a tiled layer the next tile's input is loaded in front of the
 //   current tile's operation; inputs and outputs have two buffers each.
+// - The output-channel tiles of a convolution that cover the same output
+//   rows (a row band) read the input of those rows once. Their constants,
+//   the channel range of the weights, bias and requantization table, have
+//   two buffers as well: the next tile's are loaded in front of the current
+//   tile's operation. Their outputs go to the arena with 2-D DMAs, a row of
+//   the tile's channels for each output pixel (docs/npu-spec.md 6.3).
 // Without overlap (the serial schedule to compare with) every layer loads
-// its constants and every tile its input, and stores its output, one
-// buffer each.
+// its constants (an output-channel tile its own) and every row band its
+// input, and stores its output, one buffer each.
 //
 // SRAM layout: every buffer lives from a first to a last step. Buffers
 // that live over several steps are placed first, largest first (as the
@@ -59,12 +65,14 @@ constexpr int64_t kConstRegion = 0;
 constexpr int64_t kArenaRegion = 1;
 
 /// One knpu.conv2d, knpu.avgpool or knpu.add: rows [srcRow, srcRow + inRows)
-/// of each of the layer's inputs in, rows [dstRow, dstRow + outRows) of its
-/// output out.
+/// of each of the layer's inputs in, rows [dstRow, dstRow + outRows) and
+/// channels [dstChan, dstChan + chans) of its output out. A convolution
+/// tile uses the constants of its output channels.
 struct Tile {
   Operation *op;
   int64_t srcRow, inRows;
   int64_t dstRow, outRows;
+  int64_t dstChan, chans;
 };
 
 /// The tiles writing one tensor: a step of the schedule.
@@ -73,7 +81,12 @@ struct Layer {
   SmallVector<Value, 2> srcs;
   Value dst;
   Value weight, bias, rq; // convolutions only
-  SmallVector<Tile> tiles;
+  SmallVector<Tile> tiles; // by output row, then output channel
+  // Row bands: tiles of the same output rows, which read the same input
+  // rows; per tile its band, per band its first tile
+  SmallVector<int> band;
+  SmallVector<size_t> bandStart;
+  bool channels = false; // output-channel tiles
   int64_t constOffset = 0; // in region 0
 
   bool conv() const { return static_cast<bool>(weight); }
@@ -95,20 +108,43 @@ struct Buffer {
   }
 };
 
-/// Static slice [0, row, 0, 0] [1, rows, W, C] [1, 1, 1, 1] of a 1xHxWxC
-/// tensor; returns (row, rows).
+/// Static slice [0, row, 0, chan] [1, rows, W, chans] [1, 1, 1, 1] of a
+/// 1xHxWxC tensor: whole rows, or a channel range of them; returns (row,
+/// rows, chan, chans).
 template <typename SliceOp>
-std::optional<std::pair<int64_t, int64_t>> rowSlice(SliceOp op,
-                                                    ShapedType full) {
+std::optional<std::array<int64_t, 4>> boxSlice(SliceOp op, ShapedType full) {
   ArrayRef<int64_t> off = op.getStaticOffsets(), size = op.getStaticSizes(),
                     stride = op.getStaticStrides();
   if (off.size() != 4 || llvm::any_of(stride, [](int64_t s) { return s != 1; }))
     return std::nullopt;
-  if (ShapedType::isDynamic(off[1]) || ShapedType::isDynamic(size[1]) ||
-      off[0] != 0 || off[2] != 0 || off[3] != 0 || size[0] != 1 ||
-      size[2] != full.getDimSize(2) || size[3] != full.getDimSize(3))
+  if (llvm::any_of(off, ShapedType::isDynamic) ||
+      llvm::any_of(size, ShapedType::isDynamic) || off[0] != 0 ||
+      off[2] != 0 || size[0] != 1 || size[2] != full.getDimSize(2))
     return std::nullopt;
-  return std::make_pair(off[1], size[1]);
+  return std::array<int64_t, 4>{off[1], size[1], off[3], size[3]};
+}
+
+/// The output channels [chan, chan + chans) of a convolution constant
+/// (OHWI weights, bias or requantization table) that a tile uses: a
+/// tensor.extract_slice of the layer's constant along its first dimension,
+/// or the constant itself. Returns (the layer's constant, chan, chans).
+std::optional<std::tuple<Value, int64_t, int64_t>> chanRange(Value v) {
+  auto slice = v.getDefiningOp<tensor::ExtractSliceOp>();
+  if (!slice)
+    return std::make_tuple(v, int64_t(0),
+                           cast<ShapedType>(v.getType()).getDimSize(0));
+  ArrayRef<int64_t> off = slice.getStaticOffsets(),
+                    size = slice.getStaticSizes(),
+                    stride = slice.getStaticStrides();
+  ShapedType full = slice.getSourceType();
+  if (llvm::any_of(stride, [](int64_t s) { return s != 1; }) ||
+      llvm::any_of(off, ShapedType::isDynamic) ||
+      llvm::any_of(size, ShapedType::isDynamic))
+    return std::nullopt;
+  for (int64_t d = 1; d < full.getRank(); ++d)
+    if (off[d] != 0 || size[d] != full.getDimSize(d))
+      return std::nullopt;
+  return std::make_tuple(slice.getSource(), off[0], size[0]);
 }
 
 std::vector<int8_t> denseBytes(Value v, bool *ok) {
@@ -152,6 +188,14 @@ private:
   bool doubleBuffered(const Layer &l) const {
     return overlap && l.tiles.size() > 1;
   }
+  /// The sizes of a layer's buffers and how many of each its tiles use at
+  /// once: the constants of a tile (all of the layer's or those of an
+  /// output-channel range), each input tile and the output tile
+  struct Sizes {
+    int64_t constBytes = 0, inBytes = 0, outBytes = 0;
+    int constCopies = 0, inCopies = 1, outCopies = 1;
+  };
+  Sizes sizesOf(const Layer &l) const;
   void makeBuffers();
   int placeBuffers();
   LogicalResult planSram();
@@ -169,11 +213,11 @@ private:
   // through the arena). -1: no such choice.
   SmallVector<int> ahead, aheadFrom, keep, lastUse;
 
-  // The buffers of the current plan; per step its constants (-1: none),
-  // the buffers of each input and the output buffers (empty: the tensor
-  // stays in SRAM)
+  // The buffers of the current plan; per step its constant buffers (none,
+  // one, or two for output-channel tiles), the buffers of each input and the
+  // output buffers (empty: the tensor stays in SRAM)
   std::vector<Buffer> buffers;
-  SmallVector<int> constBuf;
+  SmallVector<SmallVector<int, 2>> constBufs;
   SmallVector<std::array<SmallVector<int, 2>, 2>> inBufs;
   SmallVector<SmallVector<int, 2>> outBufs;
   llvm::DenseMap<Value, int> keptBuf; // tensor kept in SRAM -> buffer
@@ -209,19 +253,21 @@ LogicalResult SchedulePass::collect(func::FuncOp fn) {
       return op.emitOpError("cannot run on the NPU after a cpu layer");
 
     Value output = op.getResult(0);
+    auto outType = cast<ShapedType>(output.getType());
     Tile t{&op, 0, cast<ShapedType>(op.getOperand(0).getType()).getDimSize(1),
-           0, cast<ShapedType>(output.getType()).getDimSize(1)};
+           0, outType.getDimSize(1), 0, outType.getDimSize(3)};
     // The inputs, of which a tile reads the same rows
     SmallVector<Value, 2> srcs;
     for (unsigned j = 0, e = isa<AddOp>(op) ? 2 : 1; j < e; ++j) {
       Value src = op.getOperand(j);
       int64_t row = 0;
       if (auto slice = src.getDefiningOp<tensor::ExtractSliceOp>()) {
-        auto rows = rowSlice(slice, slice.getSourceType());
-        if (!rows)
+        auto box = boxSlice(slice, slice.getSourceType());
+        if (!box || (*box)[2] != 0 ||
+            (*box)[3] != slice.getSourceType().getDimSize(3))
           return slice.emitOpError("must take whole rows of its source");
         src = slice.getSource();
-        row = rows->first;
+        row = (*box)[0];
       }
       if (j == 0)
         t.srcRow = row;
@@ -240,10 +286,12 @@ LogicalResult SchedulePass::collect(func::FuncOp fn) {
     if (dst.hasOneUse()) {
       if (auto ins = dyn_cast<tensor::InsertSliceOp>(*dst.user_begin());
           ins && ins.getSource() == dst) {
-        auto rows = rowSlice(ins, ins.getDestType());
-        if (!rows)
-          return ins.emitOpError("must fill whole rows of its destination");
-        t.dstRow = rows->first;
+        auto box = boxSlice(ins, ins.getDestType());
+        if (!box)
+          return ins.emitOpError("must fill whole rows of its destination, "
+                                 "or a channel range of them");
+        t.dstRow = (*box)[0];
+        t.dstChan = (*box)[2];
         dst = ins.getResult();
         while (dst.hasOneUse()) {
           auto next = dyn_cast<tensor::InsertSliceOp>(*dst.user_begin());
@@ -254,11 +302,20 @@ LogicalResult SchedulePass::collect(func::FuncOp fn) {
       }
     }
 
+    // A convolution tile's constants: the layer's, or the same channel
+    // range of each as the tile's output
     Value weight, bias, rq;
     if (auto conv = dyn_cast<Conv2DOp>(op)) {
-      weight = conv.getWeight();
-      bias = conv.getBias();
-      rq = conv.getRq();
+      auto w = chanRange(conv.getWeight()), b = chanRange(conv.getBias()),
+           q = chanRange(conv.getRq());
+      for (auto &range : {w, b, q})
+        if (!range || std::get<1>(*range) != t.dstChan ||
+            std::get<2>(*range) != t.chans)
+          return op.emitOpError("constants must be those of the output "
+                                "channels of the tile");
+      weight = std::get<0>(*w);
+      bias = std::get<0>(*b);
+      rq = std::get<0>(*q);
     }
     Layer &layer = byDst[dst];
     if (layer.tiles.empty()) {
@@ -276,18 +333,39 @@ LogicalResult SchedulePass::collect(func::FuncOp fn) {
     layer.tiles.push_back(t);
   }
 
-  // Every layer output must be covered exactly once, tile after tile
+  // Every layer output must be covered exactly once: row band after row
+  // band, each by tiles side by side over all channels that read the same
+  // input rows
   for (auto &[dst, layer] : byDst) {
     llvm::sort(layer.tiles, [](const Tile &a, const Tile &b) {
-      return a.dstRow < b.dstRow;
+      return std::tie(a.dstRow, a.dstChan) < std::tie(b.dstRow, b.dstChan);
     });
-    int64_t next = 0;
-    for (Tile &t : layer.tiles) {
-      if (t.dstRow != next)
-        return t.op->emitOpError("tiles must cover the output rows once");
-      next += t.outRows;
+    auto [h, w, c] = hwc(dst);
+    int64_t row = 0;
+    for (size_t k = 0; k < layer.tiles.size();) {
+      const Tile &first = layer.tiles[k];
+      if (first.dstRow != row)
+        return first.op->emitOpError("tiles must cover the output rows once");
+      layer.bandStart.push_back(k);
+      int64_t chan = 0;
+      for (; k < layer.tiles.size() && layer.tiles[k].dstRow == row; ++k) {
+        const Tile &t = layer.tiles[k];
+        if (t.dstChan != chan || t.outRows != first.outRows)
+          return t.op->emitOpError("tiles must cover the output channels "
+                                   "of their rows once");
+        if (t.srcRow != first.srcRow || t.inRows != first.inRows)
+          return t.op->emitOpError("tiles of the same output rows must read "
+                                   "the same input rows");
+        layer.band.push_back(layer.bandStart.size() - 1);
+        layer.channels |= t.chans != c;
+        chan += t.chans;
+      }
+      if (chan != c)
+        return first.op->emitOpError("tiles must cover the output channels "
+                                     "of their rows once");
+      row += first.outRows;
     }
-    if (next != cast<ShapedType>(dst.getType()).getDimSize(1))
+    if (row != h)
       return layer.tiles.front().op->emitOpError(
           "tiles must cover the output rows once");
     layers.push_back(layer);
@@ -304,13 +382,35 @@ LogicalResult SchedulePass::collect(func::FuncOp fn) {
   return success();
 }
 
+SchedulePass::Sizes SchedulePass::sizesOf(const Layer &l) const {
+  Sizes s;
+  auto [ih, iw, ic] = hwc(l.tiles.front().op->getOperand(0));
+  auto [oh, ow, oc] = hwc(l.dst);
+  int64_t chans = 0;
+  for (const Tile &t : l.tiles) {
+    s.inBytes = std::max(s.inBytes, t.inRows * iw * ic);
+    s.outBytes = std::max(s.outBytes, t.outRows * ow * t.chans);
+    chans = std::max(chans, t.chans);
+  }
+  bool db = doubleBuffered(l);
+  if (l.conv()) {
+    auto w = cast<ShapedType>(l.weight.getType());
+    s.constBytes = convConstBytes(chans, w.getDimSize(1), w.getDimSize(2), ic);
+    s.constCopies = l.channels && db ? 2 : 1;
+  }
+  // Inputs are double-buffered across row bands, outputs across tiles
+  s.inCopies = overlap && l.bandStart.size() > 1 ? 2 : 1;
+  s.outCopies = db ? 2 : 1;
+  return s;
+}
+
 /// The buffers the current levels of the choices give, in the order they
 /// are made: per step its constants, inputs and outputs.
 void SchedulePass::makeBuffers() {
   buffers.clear();
   keptBuf.clear();
   size_t n = layers.size();
-  constBuf.assign(n, -1);
+  constBufs.assign(n, {});
   inBufs.assign(n, {});
   outBufs.assign(n, {});
   auto add = [&](int64_t size, int64_t first, int64_t last, int choice) {
@@ -319,31 +419,26 @@ void SchedulePass::makeBuffers() {
   };
   for (size_t i = 0; i < n; ++i) {
     const Layer &l = layers[i];
-    auto [ih, iw, ic] = hwc(l.tiles.front().op->getOperand(0));
-    auto [oh, ow, oc] = hwc(l.dst);
+    Sizes s = sizesOf(l);
     if (l.conv()) {
-      auto w = cast<ShapedType>(l.weight.getType());
-      int64_t bytes = convConstBytes(oc, w.getDimSize(1), w.getDimSize(2), ic);
       int64_t first = i;
       if (ahead[i] > 0)
         first = std::max<int64_t>(aheadFrom[i] - (ahead[i] == 2 ? 2 : 0), 0);
-      constBuf[i] = add(bytes, first, i, ahead[i] > 0 ? 2 * i : -1);
-    }
-    int copies = doubleBuffered(l) ? 2 : 1;
-    int64_t maxIn = 0, maxOut = 0;
-    for (const Tile &t : l.tiles) {
-      maxIn = std::max(maxIn, t.inRows * iw * ic);
-      maxOut = std::max(maxOut, t.outRows * ow * oc);
+      constBufs[i].push_back(
+          add(s.constBytes, first, i, ahead[i] > 0 ? 2 * i : -1));
+      // The second buffer of output-channel tiles' constants
+      if (s.constCopies > 1)
+        constBufs[i].push_back(add(s.constBytes, i, i, -1));
     }
     for (auto [j, src] : llvm::enumerate(l.srcs))
       if (!keptBuf.count(src) && !l.repeats(j))
-        for (int c = 0; c < copies; ++c)
-          inBufs[i][j].push_back(add(maxIn, i, i, -1));
+        for (int c = 0; c < s.inCopies; ++c)
+          inBufs[i][j].push_back(add(s.inBytes, i, i, -1));
     if (keep[i] > 0) {
       keptBuf[l.dst] = add(bytesOf(l.dst), i, lastUse[i], 2 * i + 1);
     } else {
-      for (int c = 0; c < copies; ++c)
-        outBufs[i].push_back(add(maxOut, i, i, -1));
+      for (int c = 0; c < s.outCopies; ++c)
+        outBufs[i].push_back(add(s.outBytes, i, i, -1));
     }
   }
 }
@@ -449,26 +544,13 @@ void SchedulePass::runOnOperation() {
   if (failed(collect(fn)))
     return signalPassFailure();
 
-  // Every layer must fit on its own, as knpu-tile made it
+  // Every layer must fit on its own, as knpu-tile made it. The second input
+  // of an add has buffers of its own unless it is the first.
   for (const Layer &l : layers) {
-    auto [ih, iw, ic] = hwc(l.tiles.front().op->getOperand(0));
-    auto [oh, ow, oc] = hwc(l.dst);
-    int64_t constBytes = 0;
-    if (l.conv()) {
-      auto w = cast<ShapedType>(l.weight.getType());
-      constBytes = convConstBytes(oc, w.getDimSize(1), w.getDimSize(2), ic);
-    }
-    int64_t maxIn = 0, maxOut = 0;
-    for (const Tile &t : l.tiles) {
-      maxIn = std::max(maxIn, t.inRows * iw * ic);
-      maxOut = std::max(maxOut, t.outRows * ow * oc);
-    }
-    int64_t need = layerSramBytes(constBytes, maxIn, maxOut,
-                                  doubleBuffered(l));
-    // The buffers of an add's second input
-    bool add = isa<AddOp>(l.tiles.front().op);
-    if (add && !l.repeats(1))
-      need += (doubleBuffered(l) ? 2 : 1) * alignTo16(maxIn);
+    Sizes s = sizesOf(l);
+    int64_t inputs = l.srcs.size() > 1 && !l.repeats(1) ? 2 : 1;
+    int64_t need = tileSramBytes(s.constBytes, s.constCopies, s.inBytes,
+                                 inputs * s.inCopies, s.outBytes, s.outCopies);
     if (need > sramSize) {
       l.tiles.front().op->emitOpError()
           << "needs " << need << " bytes of SRAM but "
@@ -528,55 +610,95 @@ void SchedulePass::runOnOperation() {
                                       b.getFunctionType({}, {}));
   b.setInsertionPointToStart(program.addEntryBlock());
   auto dma = [&](Location loc, StringRef dir, int64_t region,
-                 int64_t regionOffset, int64_t sramOffset, int64_t length) {
+                 int64_t regionOffset, int64_t sramOffset, int64_t length,
+                 int64_t count = 1, int64_t stride = 0) {
     DmaOp::create(b, loc, b.getStringAttr(dir), b.getI64IntegerAttr(region),
                   b.getI64IntegerAttr(regionOffset),
                   b.getI64IntegerAttr(sramOffset),
-                  b.getI64IntegerAttr(length), b.getI64IntegerAttr(1),
-                  b.getI64IntegerAttr(0));
+                  b.getI64IntegerAttr(length), b.getI64IntegerAttr(count),
+                  b.getI64IntegerAttr(stride));
   };
-  auto loadConstants = [&](const Layer &l, int step) {
+  // The constants of layer l's tile t into SRAM at sram: all of the
+  // layer's in one DMA, or for an output-channel tile the channel range of
+  // the weights, bias and requantization table in one DMA each, laid out
+  // as convConstBytes
+  auto loadConstants = [&](const Layer &l, const Tile &t, int64_t sram) {
     auto w = cast<ShapedType>(l.weight.getType());
-    int64_t bytes = convConstBytes(w.getDimSize(0), w.getDimSize(1),
-                                   w.getDimSize(2), w.getDimSize(3));
-    dma(l.loc(), "load", kConstRegion, l.constOffset,
-        buffers[constBuf[step]].offset, bytes);
+    int64_t oc = w.getDimSize(0), kh = w.getDimSize(1), kw = w.getDimSize(2),
+            ic = w.getDimSize(3);
+    if (!l.channels) {
+      dma(l.loc(), "load", kConstRegion, l.constOffset, sram,
+          convConstBytes(oc, kh, kw, ic));
+      return;
+    }
+    int64_t perChan = kh * kw * ic;
+    int64_t biasAt = l.constOffset + alignTo16(oc * perChan);
+    int64_t rqAt = biasAt + alignTo16(4 * oc);
+    int64_t sramBias = sram + alignTo16(t.chans * perChan);
+    int64_t sramRq = sramBias + alignTo16(4 * t.chans);
+    Location loc = t.op->getLoc();
+    dma(loc, "load", kConstRegion, l.constOffset + t.dstChan * perChan, sram,
+        t.chans * perChan);
+    dma(loc, "load", kConstRegion, biasAt + 4 * t.dstChan, sramBias,
+        4 * t.chans);
+    dma(loc, "load", kConstRegion, rqAt + 8 * t.dstChan, sramRq, 8 * t.chans);
+  };
+  // The first tile's constants of layer j, in its first constant buffer
+  auto loadFirstConstants = [&](size_t j) {
+    loadConstants(layers[j], layers[j].tiles.front(),
+                  buffers[constBufs[j][0]].offset);
   };
 
   for (auto [i, layer] : llvm::enumerate(layers)) {
     auto [ih, iw, ic] = hwc(layer.tiles.front().op->getOperand(0));
     auto [oh, ow, oc] = hwc(layer.dst);
-    bool db = doubleBuffered(layer);
+    size_t tiles = layer.tiles.size(), bands = layer.bandStart.size();
+    const SmallVector<int, 2> &consts = constBufs[i];
     auto keptOut = keptBuf.find(layer.dst);
     bool outKept = keptOut != keptBuf.end();
     int64_t dstBase = outKept ? 0 : arenaOffset[layer.dst];
 
     if (layer.conv() && ahead[i] <= 0)
-      loadConstants(layer, i);
-    // The input DMAs of tile k: one per input that has buffers, that is,
-    // that is not in SRAM already
-    auto load = [&](size_t k) {
-      const Tile &t = layer.tiles[k];
+      loadFirstConstants(i);
+    // The input DMAs of row band r: one per input that has buffers, that
+    // is, that is not in SRAM already
+    auto load = [&](size_t r) {
+      const Tile &t = layer.tiles[layer.bandStart[r]];
       for (auto [j, src] : llvm::enumerate(layer.srcs))
         if (const auto &bufs = inBufs[i][j]; !bufs.empty())
           dma(t.op->getLoc(), "load", kArenaRegion,
               arenaOffset[src] + t.srcRow * iw * ic,
-              buffers[bufs[k % bufs.size()]].offset, t.inRows * iw * ic);
+              buffers[bufs[r % bufs.size()]].offset, t.inRows * iw * ic);
     };
-    if (db)
+    // Double-buffered inputs of several row bands: the next band's input is
+    // loaded in front of the operation of the current band's first tile
+    bool dbIn = overlap && bands > 1;
+    if (dbIn)
       load(0);
-    for (size_t k = 0; k < layer.tiles.size(); ++k) {
+    for (size_t k = 0; k < tiles; ++k) {
       const Tile &t = layer.tiles[k];
-      if (!db)
-        load(k);
-      else if (k + 1 < layer.tiles.size())
-        load(k + 1);
+      size_t r = layer.band[k];
+      if (k == layer.bandStart[r]) {
+        if (!dbIn)
+          load(r);
+        else if (r + 1 < bands)
+          load(r + 1);
+      }
+      // Output-channel tiles: the next tile's constants, or with one buffer
+      // this tile's
+      if (layer.channels) {
+        if (consts.size() > 1 && k + 1 < tiles)
+          loadConstants(layer, layer.tiles[k + 1],
+                        buffers[consts[(k + 1) % 2]].offset);
+        else if (consts.size() == 1 && k > 0)
+          loadConstants(layer, t, buffers[consts[0]].offset);
+      }
       // In front of the layer's first operation: the constants of the next
       // layer with constants, loaded ahead
       if (k == 0)
         for (size_t j = i + 1; j < layers.size(); ++j)
           if (ahead[j] > 0 && aheadFrom[j] == static_cast<int>(i))
-            loadConstants(layers[j], j);
+            loadFirstConstants(j);
 
       // Where tile k finds input j
       auto inAt = [&](size_t j) {
@@ -586,7 +708,7 @@ void SchedulePass::runOnOperation() {
         if (kept != keptBuf.end())
           return buffers[kept->second].offset + t.srcRow * iw * ic;
         const auto &bufs = inBufs[i][j];
-        return buffers[bufs[k % bufs.size()]].offset;
+        return buffers[bufs[r % bufs.size()]].offset;
       };
       int64_t ifm = inAt(0);
       int64_t ofm = outKept ? buffers[keptOut->second].offset +
@@ -595,16 +717,16 @@ void SchedulePass::runOnOperation() {
       if (auto conv = dyn_cast<Conv2DOp>(t.op)) {
         auto w = conv.getWeight().getType();
         int64_t kh = w.getDimSize(1), kw = w.getDimSize(2);
-        int64_t base = buffers[constBuf[i]].offset;
-        int64_t biasAt = base + alignTo16(oc * kh * kw * ic);
+        int64_t base = buffers[consts[k % consts.size()]].offset;
+        int64_t biasAt = base + alignTo16(t.chans * kh * kw * ic);
         ConvOp::create(
             b, conv.getLoc(), b.getI64IntegerAttr(ifm),
             b.getDenseI64ArrayAttr({t.inRows, iw, ic}),
             conv.getInputZpAttr(), b.getI64IntegerAttr(ofm),
-            b.getDenseI64ArrayAttr({t.outRows, ow, oc}),
+            b.getDenseI64ArrayAttr({t.outRows, ow, t.chans}),
             conv.getOutputZpAttr(), b.getI64IntegerAttr(base),
             b.getI64IntegerAttr(biasAt),
-            b.getI64IntegerAttr(biasAt + alignTo16(4 * oc)),
+            b.getI64IntegerAttr(biasAt + alignTo16(4 * t.chans)),
             b.getDenseI64ArrayAttr({kh, kw}), conv.getStrideAttr(),
             conv.getPadAttr(), conv.getClampAttr(), conv.getRoundAttr());
       } else if (auto pool = dyn_cast<AvgPool2DOp>(t.op)) {
@@ -624,9 +746,21 @@ void SchedulePass::runOnOperation() {
             sum.getInputScaleAttr(), sum.getInput2ScaleAttr(),
             sum.getOutputScaleAttr(), sum.getClampAttr(), sum.getRoundAttr());
       }
-      if (!outKept)
-        dma(t.op->getLoc(), "store", kArenaRegion,
-            dstBase + t.dstRow * ow * oc, ofm, t.outRows * ow * oc);
+      // The output of an output-channel tile goes to its channels of each
+      // pixel: a 2-D DMA with a row of the tile's channels per pixel and the
+      // channel count as the stride (rows at most 65535 per DMA)
+      if (outKept)
+        continue;
+      int64_t at = dstBase + t.dstRow * ow * oc;
+      if (!layer.channels) {
+        dma(t.op->getLoc(), "store", kArenaRegion, at, ofm,
+            t.outRows * ow * oc);
+        continue;
+      }
+      for (int64_t p = 0, pixels = t.outRows * ow; p < pixels; p += 0xFFFF)
+        dma(t.op->getLoc(), "store", kArenaRegion, at + p * oc + t.dstChan,
+            ofm + p * t.chans, t.chans, std::min<int64_t>(0xFFFF, pixels - p),
+            oc);
     }
   }
   StopOp::create(b, fn.getLoc());
