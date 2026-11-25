@@ -12,8 +12,9 @@
 #       through lcc -> knpu-compile -> knpu_run, and the whole model with its
 #       CPU steps on cpu_run under qemu-aarch64
 #   V3  test_resnet8_model.py: the ResNet-8 of M3 (so far its V2 outputs
-#       and logits from TFLite Micro and from the tflite2c C on gcc,
-#       docs/plan.md M3.1 to M3.3)
+#       and logits from TFLite Micro and from the tflite2c C on gcc, and
+#       for a 128 KiB SRAM the whole model through lcc -> knpu-compile ->
+#       knpu_run and cpu_run under qemu-aarch64, docs/plan.md M3.1 to M3.4)
 #   V2  test_softmax.py: the tflite2c softmax on gcc against TFLite Micro,
 #       over input scales, betas and row lengths
 
@@ -156,8 +157,13 @@ set(RESNET8_MODEL_TEST
   --schema ${KNPU_TFLITE_SCHEMA}
   --lcc-dir ${KNPU_LCC_DIR}
   --cc ${CMAKE_C_COMPILER}
+  --knpu-compile $<TARGET_FILE:knpu-compile>
+  --knpu-run $<TARGET_FILE:knpu_run>
   --tflm-double $<TARGET_FILE:tflm_run_double>
   --tflm-single $<TARGET_FILE:tflm_run_single>
+  --cpu-run ${CPU_RUN}
+  --qemu ${KNPU_QEMU_AARCH64}
+  --qemu-ld-prefix ${KNPU_AARCH64_SYSROOT}
   --work-dir ${CMAKE_CURRENT_BINARY_DIR}/work-resnet8)
 
 add_test(NAME v3_resnet8_model

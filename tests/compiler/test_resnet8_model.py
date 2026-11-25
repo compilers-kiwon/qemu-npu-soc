@@ -3,7 +3,8 @@
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 """V2 and V3 of the ResNet-8 of M3 (docs/plan.md M3.1 to M3.7).
 
-So far (M3.1 to M3.3) the model, its references and the generator:
+So far (M3.1 to M3.4) the model, its references, the generator and the
+compiled model for a 128 KiB SRAM:
 
 1. models/resnet8/resnet8.tflite has the operators of docs/plan.md M3.1
    and the nominal MACs and parameters of docs/design.md 6.6.
@@ -19,6 +20,19 @@ So far (M3.1 to M3.3) the model, its references and the generator:
    its output. UBSan must report nothing.
 5. lcc (aarch64 mlir driver, -A -Wf-pragma=knpu) takes the same C without
    warnings.
+6. V3: knpu-compile turns lcc's output of the full C into model.knpu for a
+   128 KiB SRAM, where every layer fits whole (one tile), with the
+   overlapped and the serial (--overlap=false) schedule; the softmax layer
+   becomes CPU code. knpu_run runs the NPU part on hw/npu-core for every
+   input: it must leave V2's logits in the arena, PERF_MACS must be the
+   model's nominal MACs and the DMA and operation counters what the command
+   stream implies. cpu_run, an aarch64 program on qemu-aarch64 user mode,
+   runs the CPU steps on that arena: the output must equal V2's. The
+   estimated cycles (--report) are fewer with overlap. The time knpu_run
+   takes for a job, the whole process, is printed: QEMU runs a job on the
+   shared core in its main loop (docs/design.md D32).
+7. Compiled without wait commands (--insert-waits=false), the model stops
+   with a synchronization error.
 
 Inputs: the ten photographs (models/resnet8/photos/, one per CIFAR-10
 class), three random inputs, all -128 and all 127. The random inputs come
@@ -29,12 +43,17 @@ differ in the two rounding modes.
 import argparse
 import os
 import random
+import re
+import statistics
 import subprocess
 import sys
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import model_file  # noqa: E402
+from test_conv_model import ERR_SYNC, run_npu  # noqa: E402
 from test_mnist_model import (Checker, load_schema, read, run,  # noqa: E402
-                              summary, top1, write)
+                              stream_counters, summary, top1, write)
 
 SEED = 20261124
 SEARCH_LIMIT = 200   # random inputs tried for one that tells the modes apart
@@ -48,12 +67,15 @@ OPERATORS = (["CONV_2D"] * 3 + ["ADD"] + (["CONV_2D"] * 3 + ["ADD"]) * 2
 # docs/design.md 6.6
 MACS = 32_562_192
 PARAMS = 203_746
+# docs/plan.md M3.4: every layer fits in SRAM whole
+SRAM_SIZE = 131072
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     for opt in ("model", "photos", "tflite2c", "schema", "lcc-dir", "cc",
-                "tflm-double", "tflm-single", "work-dir"):
+                "knpu-compile", "knpu-run", "tflm-double", "tflm-single",
+                "cpu-run", "qemu", "qemu-ld-prefix", "work-dir"):
         ap.add_argument(f"--{opt}", required=True)
     args = ap.parse_args()
     work = args.work_dir
@@ -158,6 +180,74 @@ def main():
                             f"{tag} {build} {n}: output differs from V2")
                     c.check(read(logits) == want_logits,
                             f"{tag} {build} {n}: logits differ from V2")
+
+    # V3: the whole model, the NPU part on the shared core and the CPU
+    # steps on qemu-aarch64
+    for mode in ("double", "single"):
+        mlir = os.path.join(work, f"resnet8-{mode}.mlir")
+        cycles = {}
+        for overlap in (True, False):
+            tag = f"{mode}-128k" + ("" if overlap else "-serial")
+            knpu = os.path.join(work, f"resnet8-{tag}.knpu")
+            text = run([args.knpu_compile, f"--sram-size={SRAM_SIZE}",
+                        f"--overlap={'true' if overlap else 'false'}",
+                        "--report", mlir, "-o", knpu]).stdout
+            total = re.search(r"total cycles (\d+)", text)
+            cycles[overlap] = int(total.group(1)) if total else None
+            model = model_file.read(read(knpu))
+            c.check(model.sram_size == SRAM_SIZE, f"{tag}: header SRAM size")
+            counters = stream_counters(model)
+            logits = next(s for s in model.cpu_steps if s.kind == "copy_in")
+            out = next(t for t in model.tensors if t.direction == "output")
+            seconds = []
+            for n, inp in zip(names, inputs):
+                start = time.perf_counter()
+                result, arena = run_npu(args, model, inp, work,
+                                        f"npu-{tag}-{n}", arena=True)
+                seconds.append(time.perf_counter() - start)
+                c.check(result["err_code"] == 0 and result["macs"] == MACS,
+                        f"{tag} {n}: err_code {result['err_code']:#x}, "
+                        f"PERF_MACS {result['macs']}")
+                c.check((result["dma_rd_bytes"], result["dma_wr_bytes"],
+                         result["ops"]) == counters,
+                        f"{tag} {n}: counters differ from the stream")
+                if arena is None:
+                    continue
+                c.check(arena[logits.offset:logits.offset + logits.size]
+                        == golden[mode, n][1],
+                        f"{tag} {n}: logits in the arena differ from V2")
+                arena_in = write(os.path.join(work, f"cpu-{tag}-{n}-in.bin"),
+                                 arena)
+                arena_out = os.path.join(work, f"cpu-{tag}-{n}-out.bin")
+                r = subprocess.run([args.qemu, "-L", args.qemu_ld_prefix,
+                                    args.cpu_run, knpu, arena_in, arena_out],
+                                   capture_output=True, text=True)
+                c.check(r.returncode == 0 and not r.stderr,
+                        f"{tag} {n}: cpu_run exit {r.returncode} "
+                        f"{r.stderr.strip()}")
+                if r.returncode == 0:
+                    c.check(read(arena_out)[out.offset:out.offset + out.size]
+                            == golden[mode, n][0],
+                            f"{tag} {n}: output differs from V2")
+            rd, wr, ops = counters
+            print(f"{tag}: DMA reads {rd} and writes {wr} bytes, {ops} "
+                  f"operations; knpu_run takes "
+                  f"{statistics.median(seconds) * 1000:.0f} ms a job "
+                  f"(median of {len(seconds)})")
+        c.check(None not in cycles.values() and cycles[True] < cycles[False],
+                f"{mode}-128k: estimated cycles {cycles}")
+        print(f"{mode}-128k: estimated cycles {cycles[True]} overlapped, "
+              f"{cycles[False]} serial")
+
+        tag = f"{mode}-128k-nowait"
+        knpu = os.path.join(work, f"resnet8-{tag}.knpu")
+        run([args.knpu_compile, f"--sram-size={SRAM_SIZE}",
+             "--insert-waits=false", mlir, "-o", knpu])
+        result, _ = run_npu(args, model_file.read(read(knpu)), inputs[0],
+                            work, f"npu-{tag}")
+        c.check(result["err_code"] == ERR_SYNC,
+                f"{tag}: SYNC error without waits "
+                f"(err_code {result['err_code']:#x})")
 
     print(f"{c.passes} passed, {c.failures} failed")
     sys.exit(1 if c.failures else 0)

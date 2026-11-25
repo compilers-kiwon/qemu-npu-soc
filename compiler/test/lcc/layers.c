@@ -2,9 +2,10 @@
  * SPDX-FileCopyrightText: 2026 Kiwon Kwon
  * SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
  *
- * The pragmas of M2 in the shape tflite2c writes them (docs/design.md 9.3):
- * a convolution, an average pooling, a reshape, a fully connected layer
- * and a cpu layer, through the pinned lcc release (lcc -S
+ * The pragmas of M2 and M3 in the shape tflite2c writes them
+ * (docs/design.md 9.3): a convolution, an average pooling, a reshape, two
+ * fully connected layers with an add around the second (a residual
+ * connection) and a cpu layer, through the pinned lcc release (lcc -S
  * -Wf-pragma=knpu), knpu-import and the NPU passes, and knpu-compile with
  * the CPU code that lcc-opt, mlir-translate, clang and ld.lld make
  * (docs/design.md 9.4).
@@ -22,7 +23,7 @@
  * CHECK-NOT:   @knpu_rescale
  * CHECK-NOT:   @layer1
  * CHECK:       func.func @knpu_halve(
- * CHECK:       func.func @layer5() attributes {llvm.linkage = #llvm.linkage<external>} {
+ * CHECK:       func.func @layer7() attributes {llvm.linkage = #llvm.linkage<external>} {
  * CHECK-LABEL: func.func @knpu_model(
  * CHECK-SAME:  %[[IN:.*]]: tensor<1x6x6x1xi8> {knpu.scale = 0.00392156886 : f32, knpu.zero_point = -128 : i64})
  * CHECK-SAME:  -> (tensor<1x1x1x3xi8> {knpu.scale = 3.906250e-03 : f32, knpu.zero_point = -128 : i64})
@@ -32,31 +33,38 @@
  * CHECK:       %[[W:.*]] = arith.constant dense<{{\[\[\[\[}}1, 2, 3, 4, 5, 6, 7, 8]]], {{.*}}> : tensor<3x1x1x8xi8>
  * CHECK:       %[[RQ:.*]] = arith.constant dense<{{\[\[}}1073741824, -6], [1073741824, -6], [2147483647, -10]]> : tensor<3x2xi32>
  * CHECK:       %[[F:.*]] = knpu.conv2d %[[R]], %[[W]], %{{.*}}, %[[RQ]] {clamp = array<i64: -128, 127>, input_zp = -128 : i64, output_zp = 7 : i64, pad = array<i64: 0, 0, 0, 0>, round = "double", stride = array<i64: 1, 1>} : {{.*}} -> tensor<1x1x1x3xi8>
- * CHECK:       %[[Y:.*]] = knpu.cpu @layer5(%[[F]]) {in_array = @act4, out_array = @act5} : (tensor<1x1x1x3xi8>) -> tensor<1x1x1x3xi8>
+ * CHECK:       %[[G:.*]] = knpu.conv2d %[[F]], {{.*}} {clamp = array<i64: -128, 127>, input_zp = 7 : i64, output_zp = -3 : i64, {{.*}} -> tensor<1x1x1x3xi8>
+ * CHECK:       %[[A:.*]] = knpu.add %[[F]], %[[G]] {clamp = array<i64: -128, 127>, input2_scale = array<i64: 1610612736, 0>, input2_zp = -3 : i64, input_scale = array<i64: 1073741824, 0>, input_zp = 7 : i64, output_scale = array<i64: 1073741824, -19>, output_zp = 7 : i64, round = "double"} : (tensor<1x1x1x3xi8>, tensor<1x1x1x3xi8>) -> tensor<1x1x1x3xi8>
+ * CHECK:       %[[Y:.*]] = knpu.cpu @layer7(%[[A]]) {in_array = @act6, out_array = @act7} : (tensor<1x1x1x3xi8>) -> tensor<1x1x1x3xi8>
  * CHECK:       return %[[Y]]
- * CHECK-DAG:   llvm.mlir.global external @act4()
- * CHECK-DAG:   llvm.mlir.global external @act5()
+ * CHECK-DAG:   llvm.mlir.global external @act6()
+ * CHECK-DAG:   llvm.mlir.global external @act7()
  *
- * In 4 KiB the conv and pool outputs stay in SRAM and the fc constants
- * load while the conv runs; the fc output goes to the arena for the CPU
- * steps.
+ * In 4 KiB the activations stay in SRAM, the first fc's output (at 144)
+ * until both the second fc and the add have read it, and each fc's
+ * constants load while the layer with constants before it runs; the add's
+ * output goes to the arena for the CPU steps.
  * CMD:         knpu.region 1 "arena" size 67
  * CMD:         knpu.io "input" region 1[0] shape [1, 6, 6, 1]
  * CMD:         knpu.io "output" region 1[64] shape [1, 1, 1, 3]
- * CMD-NEXT:    knpu.cpu_step "copy_in" @act4 arena[48] size 3
- * CMD-NEXT:    knpu.cpu_step "call" @layer5
- * CMD-NEXT:    knpu.cpu_step "copy_out" @act5 arena[64] size 3
+ * CMD-NEXT:    knpu.cpu_step "copy_in" @act6 arena[48] size 3
+ * CMD-NEXT:    knpu.cpu_step "call" @layer7
+ * CMD-NEXT:    knpu.cpu_step "copy_out" @act7 arena[64] size 3
  * CMD-LABEL:   func.func @knpu_model() {
- * CMD-NEXT:    knpu.dma "load" region 0[0] sram[112] length 64
- * CMD-NEXT:    knpu.dma "load" region 1[0] sram[176] length 36
+ * CMD-NEXT:    knpu.dma "load" region 0[0] sram[176] length 64
+ * CMD-NEXT:    knpu.dma "load" region 1[0] sram[240] length 36
  * CMD-NEXT:    knpu.dma "load" region 0[64] sram[0] length 72
  * CMD-NEXT:    knpu.dma_wait 1
- * CMD-NEXT:    knpu.conv {{{.*}}ifm = 176 : i64{{.*}}ofm = 80 : i64
- * CMD-NEXT:    knpu.pool {{{.*}}ifm = 80 : i64{{.*}}ofm = 112 : i64
+ * CMD-NEXT:    knpu.conv {{{.*}}ifm = 240 : i64{{.*}}ofm = 144 : i64
+ * CMD-NEXT:    knpu.pool {{{.*}}ifm = 144 : i64{{.*}}ofm = 176 : i64
+ * CMD-NEXT:    knpu.dma "load" region 0[144] sram[80] length 56
+ * CMD-NEXT:    knpu.dma_wait 1
+ * CMD-NEXT:    knpu.conv {{{.*}}ifm = 176 : i64, ifm_shape = array<i64: 1, 1, 8>{{.*}}ofm = 144 : i64
  * CMD-NEXT:    knpu.dma_wait 0
- * CMD-NEXT:    knpu.conv {{{.*}}ifm = 112 : i64, ifm_shape = array<i64: 1, 1, 8>{{.*}}ofm = 80 : i64
+ * CMD-NEXT:    knpu.conv {{{.*}}ifm = 144 : i64, ifm_shape = array<i64: 1, 1, 3>{{.*}}ofm = 0 : i64
+ * CMD-NEXT:    knpu.elementwise {{{.*}}ifm = 144 : i64, ifm2 = 0 : i64{{.*}}ofm = 16 : i64
  * CMD-NEXT:    knpu.kernel_wait 0
- * CMD-NEXT:    knpu.dma "store" region 1[48] sram[80] length 3
+ * CMD-NEXT:    knpu.dma "store" region 1[48] sram[16] length 3
  * CMD-NEXT:    knpu.stop
  *
  * The CPU module has the cpu layer, its helper and its two arrays, and the
@@ -65,9 +73,9 @@
  * into memrefs (docs/design.md 9.4).
  * CPU:         module attributes {llvm.data_layout = "{{.*}}", llvm.target_triple = "aarch64-unknown-linux-gnu"} {
  * CPU:         func.func @knpu_halve(
- * CPU:         func.func @layer5() attributes {llvm.linkage = #llvm.linkage<external>} {
- * CPU-DAG:     llvm.mlir.global external @act4()
- * CPU-DAG:     llvm.mlir.global external @act5()
+ * CPU:         func.func @layer7() attributes {llvm.linkage = #llvm.linkage<external>} {
+ * CPU-DAG:     llvm.mlir.global external @act6()
+ * CPU-DAG:     llvm.mlir.global external @act7()
  *
  * The model file is format minor 1 with six sections; the fifth,
  * CPU_CODE, is an AArch64 shared object (ELF64, little endian, ET_DYN,
@@ -115,14 +123,24 @@ static const signed char L4_W[24] = {
 static const int L4_B[3] = { 100, 0, -100 };
 static const int L4_M[3] = { 1073741824, 1073741824, 2147483647 };
 static const int L4_S[3] = { -6, -6, -10 };
+static const signed char L5_W[9] = {
+	2, 0, 0,
+	0, 2, 0,
+	0, 0, 2
+};
+static const int L5_B[3] = { 0, 20, -20 };
+static const int L5_M[3] = { 1073741824, 1073741824, 1073741824 };
+static const int L5_S[3] = { -1, -1, -1 };
 static const float ACT0_SCALE = 0.0039215689f;
-static const float ACT5_SCALE = 0.00390625f;
+static const float ACT7_SCALE = 0.00390625f;
 signed char act0[36];
 signed char act1[32];
 signed char act2[8];
 signed char act3[8];
 signed char act4[3];
 signed char act5[3];
+signed char act6[3];
+signed char act7[3];
 
 static int knpu_rescale(int x, int m, int s)
 {
@@ -206,19 +224,56 @@ static void layer4(void)
 
 static void layer5(void)
 {
-#pragma knpu cpu in=act4 out=act5 in_shape=(1,1,3) out_shape=(1,1,3) in_zp=7 out_zp=-128
+#pragma knpu fc in=act4 out=act5 w=L5_W bias=L5_B mult=L5_M shift=L5_S in_size=3 out_size=3 in_zp=7 out_zp=-3 clamp=(-128,127)
+	int o, i, acc;
+
+	for (o = 0; o < 3; o++) {
+		acc = L5_B[o];
+		for (i = 0; i < 3; i++)
+			acc += L5_W[o * 3 + i] * (act4[i] - 7);
+		acc = knpu_rescale(acc, L5_M[o], L5_S[o]) + (-3);
+		if (acc < -128)
+			acc = -128;
+		if (acc > 127)
+			acc = 127;
+		act5[o] = (signed char)acc;
+	}
+}
+
+static void layer6(void)
+{
+#pragma knpu add in=act4 in2=act5 out=act6 shape=(1,1,3) in_zp=7 in2_zp=-3 out_zp=7 in_mult=1073741824 in_shift=0 in2_mult=1610612736 in2_shift=0 out_mult=1073741824 out_shift=-19 clamp=(-128,127)
+	int i, x1, x2, acc;
+
+	for (i = 0; i < 3; i++) {
+		x1 = knpu_rescale((act4[i] - 7) * (1 << 20), 1073741824, 0);
+		x2 = knpu_rescale((act5[i] - (-3)) * (1 << 20), 1610612736, 0);
+		acc = knpu_rescale(x1 + x2, 1073741824, -19) + 7;
+		if (acc < -128)
+			acc = -128;
+		if (acc > 127)
+			acc = 127;
+		act6[i] = (signed char)acc;
+	}
+}
+
+static void layer7(void)
+{
+#pragma knpu cpu in=act6 out=act7 in_shape=(1,1,3) out_shape=(1,1,3) in_zp=7 out_zp=-128
 	int i;
 
 	for (i = 0; i < 3; i++)
-		act5[i] = (signed char)knpu_halve(act4[i] - 7);
+		act7[i] = (signed char)knpu_halve(act6[i] - 7);
 }
 
 void knpu_model(void)
 {
-#pragma knpu model in=act0 out=act5 in_scale=ACT0_SCALE in_zp=-128 out_scale=ACT5_SCALE out_zp=-128 round="double"
+#pragma knpu model in=act0 out=act7 in_scale=ACT0_SCALE in_zp=-128 out_scale=ACT7_SCALE out_zp=-128 round="double"
 	layer1();
 	layer2();
 	layer3();
 	layer4();
 	layer5();
+	layer6();
+	layer7();
 }

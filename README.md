@@ -190,8 +190,9 @@ make test-v5
 C89로 옮기고, 층 정보는 층 함수 첫 줄의 `#pragma knpu`에 적는다. lcc가 이
 C를 MLIR로 내리면, `knpu-compile`이 MLIR 패스(가져오기, 타일링, 스케줄링,
 대기 명령 삽입)를 거쳐 `model.knpu`([형식](docs/model-format.md))를 쓴다.
-NPU에서는 합성곱, 평균 풀링, FC(1x1 합성곱으로)를 돌리고, softmax처럼 NPU에서
-돌지 않는 층은 aarch64 코드로 만들어 모델 파일에 넣는다(아래 MNIST CNN 절).
+NPU에서는 합성곱, 평균 풀링, 덧셈, FC(1x1 합성곱으로)를 돌리고, softmax처럼
+NPU에서 돌지 않는 층은 aarch64 코드로 만들어 모델 파일에 넣는다(아래 MNIST
+CNN 절).
 
 apt.llvm.org의 LLVM 23 패키지(`libmlir-23-dev`, `mlir-23-tools`,
 `llvm-23-dev`, `llvm-23-tools`, `clang-23`, `lld-23`), CMake, Ninja,
