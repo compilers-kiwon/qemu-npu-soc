@@ -25,7 +25,11 @@ test, then in the guest:
      and OP counters what the model's command stream implies. An output of
      the other rounding mode must be told apart. Prints the top1 of the
      digit images.
-  6. checks that the kernel logged no warning, then powers off
+  6. does the same as 4. and 5. for the ResNet-8: the test vectors and
+     photographs in /usr/share/knpu/resnet8/ (models/resnet8/vectors/,
+     models/resnet8/photos/), and the four models with the fifteen inputs.
+     Prints the classes of the photographs.
+  7. checks that the kernel logged no warning, then powers off
 
 UART0 goes through a UNIX socket and UART1 to a file, both kept in the log
 directory as v6-uart0.log and v6-uart1.log.
@@ -43,6 +47,7 @@ sys.path.insert(0, os.path.join(HERE, "..", "compiler"))
 import kn1_boot_test as boot  # noqa: E402
 import model_file  # noqa: E402
 import test_mnist_model as mnist  # noqa: E402
+import test_resnet8_model as resnet8  # noqa: E402
 
 check = boot.check
 TestFailure = boot.TestFailure
@@ -56,15 +61,35 @@ INPUTS = 5
 MACS = 14 * 14 * 16 * 3 * 3 * 8
 OUT_BYTES = 14 * 14 * 16
 
-# The MNIST CNN: the files of this tree that knpu-models installs in
-# MNIST_DIR, and the inputs of V3 (tests/compiler/test_mnist_model.py)
-MNIST_DIR = "/usr/share/knpu/mnist"
-MNIST_TREE = [os.path.join(HERE, "..", "..", "models", "mnist", d)
-              for d in ("vectors", "digits")]
-MNIST_SRAMS = ("64k", "32k")
-DIGITS = [f"digit-{d}" for d in range(10)]
-MNIST_INPUTS = DIGITS + ["random-0", "random-1", "random-2", "all-min",
-                         "all-max"]
+
+class Classifier:
+    """The MNIST CNN or the ResNet-8. knpu-models installs the files of
+    models/<name>/vectors/ and of its images (models/<name>/<images_dir>/)
+    in /usr/share/knpu/<name>/. The inputs are those of V3
+    (tests/compiler/test_<name>_model.py): an image of each class, named
+    <prefix>-<class>, then five more."""
+
+    def __init__(self, name, title, images_dir, what, prefix, macs,
+                 classes):
+        self.name = name
+        self.title = title
+        self.dir = f"/usr/share/knpu/{name}"
+        self.tree = [os.path.join(HERE, "..", "..", "models", name, d)
+                     for d in ("vectors", images_dir)]
+        self.images_dir = images_dir
+        self.what = what
+        self.images = [f"{prefix}-{c}" for c in classes]
+        self.inputs = self.images + ["random-0", "random-1", "random-2",
+                                     "all-min", "all-max"]
+        self.macs = macs
+        self.classes = classes
+
+
+MNIST = Classifier("mnist", "MNIST", "digits", "digit images", "digit",
+                   mnist.MACS, [str(d) for d in range(10)])
+RESNET8 = Classifier("resnet8", "ResNet-8", "photos", "photographs",
+                     "photo", resnet8.MACS, resnet8.CLASSES)
+CLASSIFIER_SRAMS = ("64k", "32k")
 
 
 def infer(con, args):
@@ -104,42 +129,43 @@ def read(path):
         return f.read()
 
 
-def check_mnist_files(con):
-    """run_mnist takes its expected values from the files of this tree, so
-    the image must hold the same files."""
+def check_files(con, net):
+    """run_classifier takes its expected values from the files of this
+    tree, so the image must hold the same files."""
     want = {}
-    for directory in MNIST_TREE:
+    for directory in net.tree:
         for name in os.listdir(directory):
             want[name] = hashlib.md5(
                 read(os.path.join(directory, name))).hexdigest()
     got = {}
-    for line in con.run(f"(cd {MNIST_DIR} && md5sum *)").splitlines():
+    for line in con.run(f"(cd {net.dir} && md5sum *)").splitlines():
         digest, sep, name = line.partition("  ")
         if sep and len(digest) == 32:
             got[name] = digest
     differ = sorted(n for n in want.keys() | got.keys()
                     if want.get(n) != got.get(n))
-    what = (f"{MNIST_DIR}/ holds the {len(want)} files of "
-            "models/mnist/vectors/ and models/mnist/digits/")
+    what = (f"{net.dir}/ holds the {len(want)} files of "
+            f"models/{net.name}/vectors/ and "
+            f"models/{net.name}/{net.images_dir}/")
     if differ:
         what += (f"; {len(differ)} differ, the first {differ[0]} (install "
                  "them again: make br-knpu-models-rebuild all)")
     check(not differ, what)
 
 
-def run_mnist(con, model, mode):
+def run_classifier(con, net, model, mode):
     stream = mnist.stream_counters(
-        model_file.read(read(os.path.join(MNIST_TREE[0], model))))
-    want = [str(n) for n in (mnist.MACS, *stream)]
+        model_file.read(read(os.path.join(net.tree[0], model))))
+    want = [str(n) for n in (net.macs, *stream)]
     tops = {}
-    for name in MNIST_INPUTS:
+    for name in net.inputs:
         expected = f"expected-{mode}-{name}.bin"
-        v, out = infer(con, f"{MNIST_DIR}/{model} {MNIST_DIR}/{name}.bin "
-                            f"--expect {MNIST_DIR}/{expected}")
+        v, out = infer(con, f"{net.dir}/{model} {net.dir}/{name}.bin "
+                            f"--expect {net.dir}/{expected}")
         what = f"{model} {name}"
         if v.get("status") != "0" or v.get("match") != "yes":
             print(out)
-        top1 = mnist.top1(read(os.path.join(MNIST_TREE[0], expected)))
+        top1 = mnist.top1(read(os.path.join(net.tree[0], expected)))
         check(v.get("status") == "0" and v.get("match") == "yes" and
               v.get("top1") == str(top1),
               f"{what}: output equals TFLite Micro ({mode} rounding), "
@@ -149,9 +175,9 @@ def run_mnist(con, model, mode):
         check(got == want,
               f"{what}: counters macs dma_rd_bytes dma_wr_bytes ops = "
               f"{' '.join(map(str, got))} (from the model: {' '.join(want)})")
-        tops[name] = v.get("top1")
-    print(f"{model}: top1 of the digit images "
-          + " ".join(f"{d}={tops[d]}" for d in DIGITS))
+        tops[name] = net.classes[top1]
+    print(f"{model}: top1 of the {net.what} "
+          + " ".join(f"{n}={tops[n]}" for n in net.images))
 
 
 def test_v6(args):
@@ -192,20 +218,22 @@ def test_v6(args):
             check(v.get("status") == "2" and "bad model file" in out,
                   "knpu-infer rejects a truncated model file")
 
-            check_mnist_files(con)
-            for mode in MODES:
-                for sram in MNIST_SRAMS:
-                    run_mnist(con, f"mnist-{mode}-{sram}.knpu", mode)
+            for net in (MNIST, RESNET8):
+                check_files(con, net)
+                for mode in MODES:
+                    for sram in CLASSIFIER_SRAMS:
+                        run_classifier(con, net,
+                                       f"{net.name}-{mode}-{sram}.knpu", mode)
 
-            # random-2 gives different outputs in the two rounding modes
-            # (tests/compiler/test_mnist_model.py)
-            v, _ = infer(con, f"{MNIST_DIR}/mnist-double-64k.knpu "
-                              f"{MNIST_DIR}/random-2.bin --expect "
-                              f"{MNIST_DIR}/expected-single-random-2.bin")
-            check(v.get("status") == "1" and v.get("match") == "no",
-                  "the double-rounding MNIST model does not match the "
-                  f"single-rounding output ({v.get('differing')} bytes "
-                  "differ)")
+                # random-2 gives different outputs in the two rounding
+                # modes (tests/compiler/test_<name>_model.py)
+                v, _ = infer(con, f"{net.dir}/{net.name}-double-64k.knpu "
+                                  f"{net.dir}/random-2.bin --expect "
+                                  f"{net.dir}/expected-single-random-2.bin")
+                check(v.get("status") == "1" and v.get("match") == "no",
+                      f"the double-rounding {net.title} model does not "
+                      "match the single-rounding output "
+                      f"({v.get('differing')} bytes differ)")
 
             out = con.run("echo warnings=$(dmesg | grep -cE "
                           "'WARNING:|BUG:|Oops|refcount_t:')")
