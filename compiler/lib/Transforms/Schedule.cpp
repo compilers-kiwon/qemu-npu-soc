@@ -9,10 +9,14 @@
 // each from SRAM or loaded like the input of a convolution, and writes a
 // third: the NPU could add in place (docs/npu-spec.md 6.4), but the output
 // always gets a buffer of its own. With overlap (the default):
-// - An activation that whole (one-tile) layers read stays in SRAM from the
-//   layer that writes it to the last layer that reads it, also when several
-//   layers read it (a residual connection). Model inputs and outputs,
-//   tensors of cpu layers and tensors of tiled layers go through the arena.
+// - An activation that a whole (one-tile) layer writes and whole layers
+//   read stays in SRAM from that layer to the last layer that reads it,
+//   also when several layers read it (a residual connection). If a later
+//   layer that reads it is tiled, or SRAM is short, it stays until the
+//   first layer that reads it, which reads it there while it is stored to
+//   the arena (both only read that SRAM, docs/npu-spec.md 9), and the
+//   later layers load it. Model inputs and outputs, tensors of cpu layers
+//   and the outputs of tiled layers go through the arena.
 // - Constants are double-buffered: the constants of a layer are loaded
 //   while the previous layer with constants runs, in front of that layer's
 //   first operation and after its own loads.
@@ -33,14 +37,19 @@
 // greedy memory planner of TFLite Micro does), then the buffers of single
 // steps in the order they were made (constants, inputs, outputs), each at
 // the lowest 16-byte aligned offset that no buffer alive at the same time
-// uses. Constants loaded ahead keep apart, where room allows, from the
+// uses; if that does not fit, the buffers of single steps go largest first
+// as well. Constants loaded ahead keep apart, where room allows, from the
 // buffers of the two layers before the one they are loaded in, which may
 // still be running (operation queue depth 2), so that the load need not
-// wait for them. When the layout does not fit, the largest buffer alive
-// with the one that failed and loaded ahead or kept in SRAM is demoted one
-// level (ahead without the margin, then not ahead; kept, then through the
-// arena) and the layout is made again. Wait commands are left to
-// knpu-insert-waits.
+// wait for them. When the layout does not fit, a choice alive with the
+// buffer that failed is demoted one level (constants: ahead without the
+// margin, then not ahead; an activation: kept until the last layer that
+// reads it, then until the first, then through the arena) and the layout
+// is made again. Of the choices whose demotion frees SRAM during the steps
+// of that buffer, the one demoted is the one that then moves the fewest
+// bytes without overlap; if there is none, the largest. Once the layout
+// fits, the demotions it turns out not to need are undone, the costliest
+// first. Wait commands are left to knpu-insert-waits.
 
 #include "knpu/Transforms/Passes.h"
 
@@ -196,8 +205,16 @@ private:
     int constCopies = 0, inCopies = 1, outCopies = 1;
   };
   Sizes sizesOf(const Layer &l) const;
+  /// Whether tensor v is in SRAM at step i, kept there by the layer that
+  /// writes it
+  bool inSram(Value v, int64_t i) const {
+    auto it = keptBuf.find(v);
+    return it != keptBuf.end() && buffers[it->second].last >= i;
+  }
   void makeBuffers();
   int placeBuffers();
+  std::pair<int64_t, bool> demotion(int choice, int64_t first,
+                                    int64_t last) const;
   LogicalResult planSram();
 
   SmallVector<Value> inputs;              // model inputs
@@ -209,9 +226,11 @@ private:
   // Choices the SRAM layout may demote, per step, and their levels:
   // ahead[j] for loading layer j's constants during step aheadFrom[j]
   // (2: ahead with the margin, 1: ahead, 0: at layer j); keep[j] for
-  // keeping layer j's output in SRAM until step lastUse[j] (1: kept, 0:
-  // through the arena). -1: no such choice.
-  SmallVector<int> ahead, aheadFrom, keep, lastUse;
+  // keeping layer j's output in SRAM (2: until step lastUse[j], the last
+  // layer that reads it; 1: until step firstUse[j], the first, and stored
+  // to the arena for the layers after it; 0: through the arena). -1: no
+  // such choice.
+  SmallVector<int> ahead, aheadFrom, keep, firstUse, lastUse;
 
   // The buffers of the current plan; per step its constant buffers (none,
   // one, or two for output-channel tiles), the buffers of each input and the
@@ -431,11 +450,12 @@ void SchedulePass::makeBuffers() {
         constBufs[i].push_back(add(s.constBytes, i, i, -1));
     }
     for (auto [j, src] : llvm::enumerate(l.srcs))
-      if (!keptBuf.count(src) && !l.repeats(j))
+      if (!inSram(src, i) && !l.repeats(j))
         for (int c = 0; c < s.inCopies; ++c)
           inBufs[i][j].push_back(add(s.inBytes, i, i, -1));
     if (keep[i] > 0) {
-      keptBuf[l.dst] = add(bytesOf(l.dst), i, lastUse[i], 2 * i + 1);
+      keptBuf[l.dst] = add(bytesOf(l.dst), i,
+                           keep[i] == 2 ? lastUse[i] : firstUse[i], 2 * i + 1);
     } else {
       for (int c = 0; c < s.outCopies; ++c)
         outBufs[i].push_back(add(s.outBytes, i, i, -1));
@@ -444,36 +464,83 @@ void SchedulePass::makeBuffers() {
 }
 
 /// Places the buffers; returns the index of one that does not fit, or -1.
+/// Buffers of several steps go first, largest first, then those of single
+/// steps in the order they were made; if that does not fit, the single
+/// steps' largest first too.
 int SchedulePass::placeBuffers() {
-  SmallVector<int> order(buffers.size());
-  std::iota(order.begin(), order.end(), 0);
-  auto spans = [&](int k) { return buffers[k].last > buffers[k].first; };
-  llvm::stable_sort(order, [&](int a, int b) {
-    if (spans(a) != spans(b))
-      return spans(a);
-    return spans(a) && buffers[a].size > buffers[b].size;
-  });
-  SmallVector<int> placed;
-  for (int k : order) {
-    Buffer &buf = buffers[k];
-    SmallVector<std::pair<int64_t, int64_t>> busy;
-    for (int j : placed)
-      if (buffers[j].alive(buf))
-        busy.push_back({buffers[j].offset,
-                        buffers[j].offset + buffers[j].size});
-    llvm::sort(busy);
-    int64_t offset = 0;
-    for (auto [begin, end] : busy) {
-      if (offset + buf.size <= begin)
-        break;
-      offset = std::max(offset, end);
+  auto attempt = [&](bool bigFirst) {
+    SmallVector<int> order(buffers.size());
+    std::iota(order.begin(), order.end(), 0);
+    auto spans = [&](int k) { return buffers[k].last > buffers[k].first; };
+    llvm::stable_sort(order, [&](int a, int b) {
+      if (spans(a) != spans(b))
+        return spans(a);
+      return (bigFirst || spans(a)) && buffers[a].size > buffers[b].size;
+    });
+    SmallVector<int> placed;
+    for (int k : order) {
+      Buffer &buf = buffers[k];
+      SmallVector<std::pair<int64_t, int64_t>> busy;
+      for (int j : placed)
+        if (buffers[j].alive(buf))
+          busy.push_back({buffers[j].offset,
+                          buffers[j].offset + buffers[j].size});
+      llvm::sort(busy);
+      int64_t offset = 0;
+      for (auto [begin, end] : busy) {
+        if (offset + buf.size <= begin)
+          break;
+        offset = std::max(offset, end);
+      }
+      if (offset + buf.size > sramSize)
+        return k;
+      buf.offset = offset;
+      placed.push_back(k);
     }
-    if (offset + buf.size > sramSize)
-      return k;
-    buf.offset = offset;
-    placed.push_back(k);
+    return -1;
+  };
+  int failed = attempt(false);
+  if (failed >= 0 && attempt(true) < 0)
+    return -1;
+  return failed;
+}
+
+/// Demoting a choice by one level: the bytes it then moves without overlap,
+/// and whether it frees SRAM at one of the steps [first, last].
+std::pair<int64_t, bool> SchedulePass::demotion(int choice, int64_t first,
+                                                int64_t last) const {
+  int64_t i = choice / 2;
+  // Whether a step of [lo, hi] within [first, last] is not a step of a
+  // layer that still needs the bytes
+  auto frees = [&](int64_t lo, int64_t hi, auto needs) {
+    for (int64_t s = std::max(lo, first); s <= std::min(hi, last); ++s)
+      if (!needs(s))
+        return true;
+    return false;
+  };
+  auto none = [](int64_t) { return false; };
+  if (choice % 2 == 0) {
+    // Layer i's constants: loaded at the step they are loaded during, then
+    // at layer i
+    int64_t from = aheadFrom[i];
+    if (ahead[i] == 2)
+      return {0, frees(from - 2, from - 1, none)};
+    return {buffers[constBufs[i][0]].size, frees(from, i - 1, none)};
   }
-  return -1;
+  // Layer i's output: kept until the first layer that reads it, the later
+  // ones loading it; or through the arena, stored and loaded again before
+  // the first
+  Value v = layers[i].dst;
+  int64_t bytes = bytesOf(v);
+  if (keep[i] == 2 && firstUse[i] < lastUse[i]) {
+    int64_t loads = 0;
+    for (int64_t j = firstUse[i] + 1; j <= lastUse[i]; ++j)
+      loads += layers[j].reads(v);
+    return {loads * bytes, frees(firstUse[i] + 1, lastUse[i], [&](int64_t s) {
+              return layers[s].reads(v);
+            })};
+  }
+  return {2 * bytes, frees(i + 1, firstUse[i] - 1, none)};
 }
 
 LogicalResult SchedulePass::planSram() {
@@ -481,6 +548,7 @@ LogicalResult SchedulePass::planSram() {
   ahead.assign(n, -1);
   aheadFrom.assign(n, -1);
   keep.assign(n, -1);
+  firstUse.assign(n, -1);
   lastUse.assign(n, -1);
   if (overlap) {
     // Constants: during the previous layer with constants
@@ -494,43 +562,97 @@ LogicalResult SchedulePass::planSram() {
       }
       previous = i;
     }
-    // Outputs that only whole layers read, and are not model outputs
+    // Outputs of whole layers that are not model outputs and that a whole
+    // layer reads first: kept until the last layer that reads them if only
+    // whole layers do, else until the first
     for (size_t i = 0; i < n; ++i) {
       const Layer &l = layers[i];
-      bool readElsewhere =
-          l.tiles.size() > 1 ||
+      if (l.tiles.size() > 1 ||
           llvm::any_of(outputs, [&](Value v) { return root(v) == l.dst; }) ||
           llvm::any_of(cpus, [&](CpuOp c) {
             return root(c.getInput()) == l.dst;
-          });
-      for (size_t j = i + 1; j < n && !readElsewhere; ++j)
+          }))
+        continue;
+      bool whole = true;
+      for (size_t j = i + 1; j < n; ++j)
         if (layers[j].reads(l.dst)) {
-          readElsewhere = layers[j].tiles.size() > 1;
+          if (firstUse[i] < 0)
+            firstUse[i] = j;
           lastUse[i] = j;
+          whole = whole && layers[j].tiles.size() == 1;
         }
-      if (!readElsewhere && lastUse[i] >= 0)
-        keep[i] = 1;
+      if (firstUse[i] >= 0 && layers[firstUse[i]].tiles.size() == 1)
+        keep[i] = whole ? 2 : 1;
     }
   }
 
+  auto demote = [&](int choice) {
+    int i = choice / 2;
+    if (choice % 2 == 0)
+      --ahead[i];
+    // With one layer reading it, kept until the first is kept until the last
+    else if (--keep[i] == 1 && firstUse[i] == lastUse[i])
+      keep[i] = 0;
+  };
+  auto promote = [&](int choice) {
+    int i = choice / 2;
+    if (choice % 2 == 0)
+      ++ahead[i];
+    else if (++keep[i] == 1 && firstUse[i] == lastUse[i])
+      keep[i] = 2;
+  };
+  // The demotions made, with the bytes each then moves without overlap
+  SmallVector<std::pair<int, int64_t>> demoted;
   for (;;) {
     makeBuffers();
     int failed = placeBuffers();
     if (failed < 0)
-      return success();
-    // Demote the largest choice alive with the buffer that did not fit
-    int best = -1;
-    for (auto [k, buf] : llvm::enumerate(buffers))
-      if (buf.choice >= 0 && buf.alive(buffers[failed]) &&
-          (best < 0 || buf.size > buffers[best].size))
+      break;
+    // Demote one level, of the choices alive with the buffer that did not
+    // fit and whose demotion frees SRAM during its steps, the one that moves
+    // the fewest bytes without overlap; if there is none, the largest (its
+    // buffers may then be placed elsewhere)
+    const Buffer &f = buffers[failed];
+    int best = -1, largest = -1;
+    int64_t bestCost = 0;
+    for (auto [k, buf] : llvm::enumerate(buffers)) {
+      if (buf.choice < 0 || !buf.alive(f))
+        continue;
+      if (largest < 0 || buf.size > buffers[largest].size)
+        largest = k;
+      auto [cost, frees] = demotion(buf.choice, f.first, f.last);
+      if (frees && (best < 0 || cost < bestCost ||
+                    (cost == bestCost && buf.size > buffers[best].size))) {
         best = k;
+        bestCost = cost;
+      }
+    }
+    if (best < 0)
+      best = largest;
     if (best < 0)
       return layers.front().tiles.front().op->emitOpError()
              << "buffers do not fit in " << static_cast<int64_t>(sramSize)
              << " bytes of SRAM";
     int choice = buffers[best].choice;
-    --(choice % 2 ? keep : ahead)[choice / 2];
+    demoted.push_back({choice, demotion(choice, 0, -1).first});
+    demote(choice);
   }
+  // Promote back, the costliest first, the demotions that the layout turns
+  // out not to need (a later demotion may have freed the SRAM they did)
+  llvm::stable_sort(demoted, [](const auto &a, const auto &b) {
+    return a.second > b.second;
+  });
+  for (const auto &d : demoted) {
+    promote(d.first);
+    makeBuffers();
+    if (placeBuffers() >= 0)
+      demote(d.first);
+  }
+  makeBuffers();
+  if (placeBuffers() >= 0)
+    return layers.front().tiles.front().op->emitOpError(
+        "internal error: the SRAM layout no longer fits");
+  return success();
 }
 
 void SchedulePass::runOnOperation() {
@@ -566,7 +688,8 @@ void SchedulePass::runOnOperation() {
   OpBuilder b(fn);
 
   // Arena: model inputs, then in program order the layer outputs that do
-  // not stay in SRAM and the outputs of cpu layers
+  // not stay in SRAM until the last layer that reads them and the outputs
+  // of cpu layers
   llvm::DenseMap<Value, int64_t> arenaOffset;
   int64_t arenaSize = 0;
   auto place = [&](Value v) {
@@ -576,8 +699,8 @@ void SchedulePass::runOnOperation() {
   };
   for (Value v : inputs)
     place(v);
-  for (const Layer &l : layers)
-    if (!keptBuf.count(l.dst))
+  for (auto [i, l] : llvm::enumerate(layers))
+    if (keep[i] < 2)
       place(l.dst);
   for (CpuOp c : cpus)
     place(c.getOutput());
@@ -656,7 +779,10 @@ void SchedulePass::runOnOperation() {
     const SmallVector<int, 2> &consts = constBufs[i];
     auto keptOut = keptBuf.find(layer.dst);
     bool outKept = keptOut != keptBuf.end();
-    int64_t dstBase = outKept ? 0 : arenaOffset[layer.dst];
+    // An output kept until the first layer that reads it goes to the arena
+    // as well, for the layers after it
+    bool outStored = keep[i] < 2;
+    int64_t dstBase = outStored ? arenaOffset[layer.dst] : 0;
 
     if (layer.conv() && ahead[i] <= 0)
       loadFirstConstants(i);
@@ -704,9 +830,9 @@ void SchedulePass::runOnOperation() {
       auto inAt = [&](size_t j) {
         if (layer.repeats(j))
           j = 0;
-        auto kept = keptBuf.find(layer.srcs[j]);
-        if (kept != keptBuf.end())
-          return buffers[kept->second].offset + t.srcRow * iw * ic;
+        if (inSram(layer.srcs[j], i))
+          return buffers[keptBuf.lookup(layer.srcs[j])].offset +
+                 t.srcRow * iw * ic;
         const auto &bufs = inBufs[i][j];
         return buffers[bufs[r % bufs.size()]].offset;
       };
@@ -749,7 +875,7 @@ void SchedulePass::runOnOperation() {
       // The output of an output-channel tile goes to its channels of each
       // pixel: a 2-D DMA with a row of the tile's channels per pixel and the
       // channel count as the stride (rows at most 65535 per DMA)
-      if (outKept)
+      if (!outStored)
         continue;
       int64_t at = dstBase + t.dstRow * ow * oc;
       if (!layer.channels) {
