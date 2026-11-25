@@ -6,15 +6,18 @@
 Every layer becomes one parameterless static function whose body is the
 C89 loop TFLite Micro's reference kernel runs, and whose first line is the
 layer's `#pragma knpu` (docs/design.md 9.2, 9.3). knpu_model() calls the
-layers in order and carries `#pragma knpu model`. Requantization multipliers
-and shifts, and the softmax parameters, are computed with TFLite Micro's
-formulas for the chosen rounding mode.
+layers in order and carries `#pragma knpu model`. The model input is the
+array act0 and the output of layer N is actN; a layer may read any array
+written before it, so that one array can feed several layers (the residual
+connections of ResNet-8). Requantization multipliers and shifts, and the
+softmax parameters, are computed with TFLite Micro's formulas for the
+chosen rounding mode.
 
-CONV_2D, AVERAGE_POOL_2D, RESHAPE and FULLY_CONNECTED are NPU layers
-(pragmas conv2d, avgpool, reshape and fc). SOFTMAX is a CPU layer (pragma
-cpu): its body is TFLite Micro's int8 Softmax with the gemmlowp fixed-point
-functions it uses, ported to C89. CPU layers must come after the last NPU
-layer.
+CONV_2D, AVERAGE_POOL_2D, ADD, RESHAPE and FULLY_CONNECTED are NPU layers
+(pragmas conv2d, avgpool, add, reshape and fc). SOFTMAX is a CPU layer
+(pragma cpu): its body is TFLite Micro's int8 Softmax with the gemmlowp
+fixed-point functions it uses, ported to C89. CPU layers must come after
+the last NPU layer, each reading the output of the layer before it.
 
     tflite2c.py --schema schema_py_generated.py --round double \\
         model.tflite -o model.c [--main main.c] [--npu-only]
@@ -36,6 +39,10 @@ import struct
 import sys
 
 INT8_MIN, INT8_MAX = -128, 127
+
+# ADD of int8 tensors (kernels/add_common.cc): the inputs minus their zero
+# points are shifted left by this before they are rescaled
+ADD_LEFT_SHIFT = 20
 
 # Softmax (reference/softmax.h): Q5.26 input differences, Q12.19 sums
 SCALED_DIFF_INTEGER_BITS = 5
@@ -83,6 +90,17 @@ def quantize_multiplier(m, single_rounding):
         shift, q_fixed = 0, 0
     if single_rounding and shift > 30:
         shift, q_fixed = 30, 2**31 - 1
+    return q_fixed, shift
+
+
+def quantize_multiplier_smaller_than_one(m, single_rounding, what):
+    """QuantizeMultiplierSmallerThanOneExp (kernels/internal/
+    quantization_util.cc): a multiplier below 1, so the shift is at most 0."""
+    if not 0.0 < m < 1.0:
+        fail(f"{what} must be between 0 and 1")
+    q_fixed, shift = quantize_multiplier(m, single_rounding)
+    if shift > 0:
+        fail(f"{what} rounds to 1")
     return q_fixed, shift
 
 
@@ -279,6 +297,48 @@ class AvgPool:
                                       out.zero_points[0], schema)
 
 
+class Add:
+    """One ADD of two tensors of the same shape (no broadcasting)."""
+
+    cpu = False
+
+    def __init__(self, model, sub, op, schema, round_mode):
+        if op.InputsLength() != 2:
+            fail("ADD needs two inputs")
+        in1 = Tensor(model, sub, op.Inputs(0), schema)
+        in2 = Tensor(model, sub, op.Inputs(1), schema)
+        out = Tensor(model, sub, op.Outputs(0), schema)
+        opts = builtin_options(op, schema.AddOptions)
+
+        tt = schema.TensorType
+        if (in1.type, in2.type, out.type) != (tt.INT8, tt.INT8, tt.INT8):
+            fail("ADD must be int8")
+        if in1.shape != out.shape or in2.shape != out.shape:
+            fail("ADD inputs and output must have the same shape")
+
+        self.input, self.input2, self.output = in1, in2, out
+        self.shape = out.hwc("ADD output")
+        self.in_zp = in1.zero_points[0]
+        self.in2_zp = in2.zero_points[0]
+        self.out_zp = out.zero_points[0]
+
+        # CalculateOpDataAdd (kernels/add_common.cc) for int8: each input is
+        # rescaled by its scale over twice the larger input scale, and their
+        # sum by that over the output scale times 2^ADD_LEFT_SHIFT
+        single = round_mode == "single"
+        s1, s2, so = (float(t.scales[0]) for t in (in1, in2, out))
+        twice_max = 2 * max(s1, s2)
+        self.in_mult, self.in_shift = quantize_multiplier_smaller_than_one(
+            s1 / twice_max, single, "ADD input 1 multiplier")
+        self.in2_mult, self.in2_shift = quantize_multiplier_smaller_than_one(
+            s2 / twice_max, single, "ADD input 2 multiplier")
+        self.out_mult, self.out_shift = quantize_multiplier_smaller_than_one(
+            twice_max / ((1 << ADD_LEFT_SHIFT) * so), single,
+            "ADD output multiplier")
+        self.clamp = activation_range(opts.FusedActivationFunction(), so,
+                                      self.out_zp, schema)
+
+
 class Reshape:
     """One RESHAPE: the same bytes in another shape."""
 
@@ -397,7 +457,7 @@ def read_model(path, schema, round_mode):
     if sub.InputsLength() != 1 or sub.OutputsLength() != 1:
         fail("the model must have one input and one output")
     ops = schema.BuiltinOperator
-    kinds = {ops.CONV_2D: Conv, ops.AVERAGE_POOL_2D: AvgPool,
+    kinds = {ops.CONV_2D: Conv, ops.AVERAGE_POOL_2D: AvgPool, ops.ADD: Add,
              ops.RESHAPE: Reshape, ops.FULLY_CONNECTED: FullyConnected,
              ops.SOFTMAX: Softmax}
     layers = []
@@ -669,6 +729,41 @@ def avgpool_function(n, a, act_in, act_out):
         (0, "}"))
 
 
+def add_function(n, a, act_in, act_in2, act_out):
+    h, w, c = a.shape
+    pragma = (
+        f"#pragma knpu add in={act_in} in2={act_in2} out={act_out} "
+        f"shape=({h},{w},{c}) "
+        f"in_zp={a.in_zp} in2_zp={a.in2_zp} out_zp={a.out_zp} "
+        f"in_mult={a.in_mult} in_shift={a.in_shift} "
+        f"in2_mult={a.in2_mult} in2_shift={a.in2_shift} "
+        f"out_mult={a.out_mult} out_shift={a.out_shift} "
+        f"clamp=({a.clamp[0]},{a.clamp[1]})")
+    up = f"(1 << {ADD_LEFT_SHIFT})"
+    # AddFunc (reference/integer_ops/add.h): each input minus its zero point
+    # is shifted left and rescaled, and their sum rescaled to the output
+    return c_block(
+        (0, f"static void layer{n}(void)"),
+        (0, "{"),
+        (0, pragma),
+        (1, "int i, x1, x2, acc;"),
+        (0, ""),
+        (1, f"for (i = 0; i < {h * w * c}; i++) {{"),
+        (2, f"x1 = knpu_rescale(({act_in}[i] - ({a.in_zp})) * {up}, "
+            f"{a.in_mult}, {a.in_shift});"),
+        (2, f"x2 = knpu_rescale(({act_in2}[i] - ({a.in2_zp})) * {up}, "
+            f"{a.in2_mult}, {a.in2_shift});"),
+        (2, f"acc = knpu_rescale(x1 + x2, {a.out_mult}, {a.out_shift}) "
+            f"+ ({a.out_zp});"),
+        (2, f"if (acc < {a.clamp[0]})"),
+        (3, f"acc = {a.clamp[0]};"),
+        (2, f"if (acc > {a.clamp[1]})"),
+        (3, f"acc = {a.clamp[1]};"),
+        (2, f"{act_out}[i] = (signed char)acc;"),
+        (1, "}"),
+        (0, "}"))
+
+
 def reshape_function(n, r, act_in, act_out):
     pragma = (
         f"#pragma knpu reshape in={act_in} out={act_out} "
@@ -808,22 +903,35 @@ def write_model_c(src_name, layers, model_in, model_out, round_mode):
     for n, t in enumerate(acts):
         out.append(f"signed char act{n}[{t.size()}];")
     out.append("")
-    if any(isinstance(layer, (Conv, FullyConnected)) for layer in layers) or (
-            round_mode == "single"
-            and any(isinstance(layer, Softmax) for layer in layers)):
+    # knpu_rescale: the layers that requantize, and the input scaling of a
+    # softmax with single rounding
+    rescaling = (Conv, Add, FullyConnected) + (
+        (Softmax,) if round_mode == "single" else ())
+    if any(isinstance(layer, rescaling) for layer in layers):
         out.append(RESCALE[round_mode])
         out.append("")
     if any(isinstance(layer, Softmax) for layer in layers):
         out.append(SOFTMAX_HELPERS)
         out.append("")
+    # A layer reads arrays written before it: one array may feed several
+    # layers (a residual connection), and an ADD reads two
+    array = {model_in.index: "act0"}
     for n, layer in enumerate(layers, 1):
-        if layer.input.index != acts[n - 1].index:
-            fail("layers must form a chain from the model input")
-        act_in, act_out = f"act{n - 1}", f"act{n}"
+        reads = [layer.input] + (
+            [layer.input2] if isinstance(layer, Add) else [])
+        if any(t.index not in array for t in reads):
+            fail(f"layer {n} reads a tensor that is neither the model input "
+                 "nor the output of an earlier layer")
+        if layer.cpu and layer.input.index != acts[n - 1].index:
+            fail("a CPU layer must read the output of the layer before it")
+        act_in, act_out = array[layer.input.index], f"act{n}"
         if isinstance(layer, Conv):
             out.append(conv_function(n, layer, act_in, act_out))
         elif isinstance(layer, AvgPool):
             out.append(avgpool_function(n, layer, act_in, act_out))
+        elif isinstance(layer, Add):
+            out.append(add_function(n, layer, act_in,
+                                    array[layer.input2.index], act_out))
         elif isinstance(layer, Reshape):
             out.append(reshape_function(n, layer, act_in, act_out))
         elif isinstance(layer, FullyConnected):
@@ -831,6 +939,7 @@ def write_model_c(src_name, layers, model_in, model_out, round_mode):
         else:
             out.append(softmax_function(n, layer, act_in, act_out,
                                         round_mode))
+        array[layer.output.index] = act_out
         out.append("")
     pragma = (f"#pragma knpu model in=act0 out=act{last} "
               f"in_scale=ACT0_SCALE in_zp={model_in.zero_points[0]} "

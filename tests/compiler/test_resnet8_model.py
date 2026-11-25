@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 """V2 and V3 of the ResNet-8 of M3 (docs/plan.md M3.1 to M3.7).
 
-So far (M3.1) the model and its references:
+So far (M3.1 to M3.3) the model, its references and the generator:
 
 1. models/resnet8/resnet8.tflite has the operators of docs/plan.md M3.1
    and the nominal MACs and parameters of docs/design.md 6.6.
@@ -12,6 +12,13 @@ So far (M3.1) the model and its references:
    final SOFTMAX).
 3. At least one input gives different outputs in the two rounding modes,
    so that a wrong rounding mode shows in V3 and V6.
+4. tflite2c writes the model as C89 for each rounding mode, in full and
+   with --npu-only. gcc (-std=c89 -pedantic-errors) builds it, also with
+   UBSan (-fsanitize=undefined), and for every input the outputs and the
+   logits must equal TFLite Micro's; the --npu-only C gives the logits as
+   its output. UBSan must report nothing.
+5. lcc (aarch64 mlir driver, -A -Wf-pragma=knpu) takes the same C without
+   warnings.
 
 Inputs: the ten photographs (models/resnet8/photos/, one per CIFAR-10
 class), three random inputs, all -128 and all 127. The random inputs come
@@ -22,6 +29,7 @@ differ in the two rounding modes.
 import argparse
 import os
 import random
+import subprocess
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -44,8 +52,8 @@ PARAMS = 203_746
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    for opt in ("model", "photos", "schema", "tflm-double", "tflm-single",
-                "work-dir"):
+    for opt in ("model", "photos", "tflite2c", "schema", "lcc-dir", "cc",
+                "tflm-double", "tflm-single", "work-dir"):
         ap.add_argument(f"--{opt}", required=True)
     args = ap.parse_args()
     work = args.work_dir
@@ -110,6 +118,46 @@ def main():
           + (", ".join(differ) or "none"))
     print("top-1 (double): " + ", ".join(
         f"{n}={CLASSES[top1(golden['double', n][0])]}" for n in names))
+
+    # V2: the tflite2c C on gcc, with and without UBSan, and on lcc
+    lcc = os.path.join(args.lcc_dir, "lcc")
+    env = dict(os.environ, LCCDIR=args.lcc_dir)
+    cflags = ["-std=c89", "-pedantic-errors", "-Wall", "-Wno-unknown-pragmas",
+              "-Wno-unused-const-variable", "-O1"]
+    builds = (("gcc", cflags),
+              ("ubsan", cflags + ["-fsanitize=undefined",
+                                  "-fno-sanitize-recover=undefined"]))
+    for mode in ("double", "single"):
+        for npu_only in (False, True):
+            tag = f"{mode}-npu" if npu_only else mode
+            src = os.path.join(work, f"resnet8-{tag}.c")
+            main_c = os.path.join(work, f"main-{tag}.c")
+            mlir = os.path.join(work, f"resnet8-{tag}.mlir")
+            run([sys.executable, args.tflite2c, "--schema", args.schema,
+                 "--round", mode, args.model, "-o", src, "--main", main_c]
+                + (["--npu-only"] if npu_only else []))
+            r = subprocess.run([lcc, "-A", "-Wf-pragma=knpu", "-S", src,
+                                "-o", mlir],
+                               env=env, capture_output=True, text=True)
+            c.check(r.returncode == 0 and not r.stderr,
+                    f"{tag}: lcc -A: {r.stderr.strip()}")
+            for build, flags in builds:
+                exe = os.path.join(work, f"resnet8-{tag}-{build}")
+                run([args.cc, *flags, "-o", exe, src, main_c])
+                for n in names:
+                    out, logits = (os.path.join(work, f"{tag}-{n}-{build}{x}")
+                                   for x in (".bin", "-logits.bin"))
+                    r = subprocess.run([exe, os.path.join(work, f"{n}.bin"),
+                                        out, logits],
+                                       capture_output=True, text=True)
+                    c.check(r.returncode == 0 and not r.stderr,
+                            f"{tag} {build} {n}: exit {r.returncode} "
+                            f"{r.stderr.strip()}")
+                    want, want_logits = golden[mode, n]
+                    c.check(read(out) == (want_logits if npu_only else want),
+                            f"{tag} {build} {n}: output differs from V2")
+                    c.check(read(logits) == want_logits,
+                            f"{tag} {build} {n}: logits differ from V2")
 
     print(f"{c.passes} passed, {c.failures} failed")
     sys.exit(1 if c.failures else 0)
