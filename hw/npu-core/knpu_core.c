@@ -16,11 +16,18 @@ typedef struct KnpuShape {
     uint32_t h, w, c;
 } KnpuShape;
 
+/* A requantization of spec 8.1: multiplier and shift */
+typedef struct KnpuScale {
+    int32_t m;
+    int s;
+} KnpuScale;
+
 /* SET state (spec 5); reset to these defaults at every job start */
 typedef struct KnpuState {
-    uint32_t ifm_base, ofm_base, weight_base, bias_base, rq_table;
+    uint32_t ifm_base, ifm2_base, ofm_base, weight_base, bias_base, rq_table;
     KnpuShape ifm, ofm;
-    int32_t ifm_zp, ofm_zp;
+    int32_t ifm_zp, ifm2_zp, ofm_zp;
+    KnpuScale ifm_scale, ifm2_scale, ofm_scale;
     uint32_t kh, kw, sh, sw;
     uint32_t pad_top, pad_left, pad_bottom, pad_right;
     int32_t clamp_min, clamp_max;
@@ -240,9 +247,11 @@ static bool window_shape_ok(const KnpuState *st)
 
 /*
  * SRAM range and overlap checks of an operation (spec 6.4 steps 2 and 3).
- * The OFM write is the last range of @acc and must not overlap the reads.
+ * The OFM write is the last range of @acc and must not overlap the reads,
+ * except that with @in_place (OP_ADD) a read range may equal it.
  */
-static int check_ranges(const KnpuCtx *c, const KnpuAccess *acc)
+static int check_ranges(const KnpuCtx *c, const KnpuAccess *acc,
+                        bool in_place)
 {
     const KnpuRange *o = &acc->r[acc->n - 1];
 
@@ -253,6 +262,9 @@ static int check_ranges(const KnpuCtx *c, const KnpuAccess *acc)
     }
     for (int i = 0; i < acc->n - 1; i++) {
         const KnpuRange *r = &acc->r[i];
+        if (in_place && r->start == o->start && r->end == o->end) {
+            continue;
+        }
         if (o->start < r->end && r->start < o->end) {
             return KNPU_ERR_BAD_PARAM;
         }
@@ -278,7 +290,7 @@ static int exec_conv(KnpuCtx *c)
     add_range(&acc, st->rq_table, 8 * (uint64_t)out->c, false);
     add_range(&acc, st->ofm_base, (uint64_t)out->h * out->w * out->c, true);
 
-    int err = check_ranges(c, &acc);
+    int err = check_ranges(c, &acc, false);
     if (err != KNPU_ERR_NONE) {
         return err;
     }
@@ -357,7 +369,7 @@ static int exec_avgpool(KnpuCtx *c)
     add_range(&acc, st->ifm_base, (uint64_t)in->h * in->w * in->c, false);
     add_range(&acc, st->ofm_base, (uint64_t)out->h * out->w * out->c, true);
 
-    int err = check_ranges(c, &acc);
+    int err = check_ranges(c, &acc, false);
     if (err != KNPU_ERR_NONE) {
         return err;
     }
@@ -403,6 +415,64 @@ static int exec_avgpool(KnpuCtx *c)
     return KNPU_ERR_NONE;
 }
 
+/* TFLite Micro's left_shift for int8 (add_common.cc), fixed by spec 8.3 */
+#define KNPU_ADD_LEFT_SHIFT 20
+
+static int exec_add(KnpuCtx *c)
+{
+    const KnpuState *st = &c->st;
+    const KnpuShape *in = &st->ifm, *out = &st->ofm;
+    KnpuAccess acc = { .n = 0 };
+
+    /*
+     * Both shapes set and equal; IFM2 has the shape of the IFM (spec 6.4).
+     * KERNEL, STRIDE and PAD are not used.
+     */
+    if (!in->c || in->h != out->h || in->w != out->w || in->c != out->c) {
+        return KNPU_ERR_BAD_PARAM;
+    }
+
+    uint64_t n = (uint64_t)in->h * in->w * in->c;
+    add_range(&acc, st->ifm_base, n, false);
+    add_range(&acc, st->ifm2_base, n, false);
+    add_range(&acc, st->ofm_base, n, true);
+
+    int err = check_ranges(c, &acc, true);
+    if (err != KNPU_ERR_NONE) {
+        return err;
+    }
+    if (!issue(&c->kernel_q, &c->dma_q, &acc)) {
+        return KNPU_ERR_SYNC;
+    }
+
+    /*
+     * Spec 8.3, the arithmetic of TFLite Micro AddFunc (int8). Nothing
+     * overflows: the shifted inputs are at most 255 << 20 in magnitude and
+     * the multipliers are below 1, so the scaled inputs and their sum stay
+     * below 2^29. Each element reads both inputs before its output is
+     * written, so an in-place addition gives the same result.
+     */
+    const int8_t *in1 = (const int8_t *)(c->sram + st->ifm_base);
+    const int8_t *in2 = (const int8_t *)(c->sram + st->ifm2_base);
+    int8_t *ofm = (int8_t *)(c->sram + st->ofm_base);
+
+    for (uint64_t i = 0; i < n; i++) {
+        int32_t a = (in1[i] - st->ifm_zp) * (1 << KNPU_ADD_LEFT_SHIFT);
+        int32_t b = (in2[i] - st->ifm2_zp) * (1 << KNPU_ADD_LEFT_SHIFT);
+
+        a = knpu_rescale(a, st->ifm_scale.m, st->ifm_scale.s,
+                         st->round_mode);
+        b = knpu_rescale(b, st->ifm2_scale.m, st->ifm2_scale.s,
+                         st->round_mode);
+        int32_t v = knpu_rescale(a + b, st->ofm_scale.m, st->ofm_scale.s,
+                                 st->round_mode) + st->ofm_zp;
+        ofm[i] = (int8_t)clamp32(v, st->clamp_min, st->clamp_max);
+    }
+
+    c->perf.ops++;
+    return KNPU_ERR_NONE;
+}
+
 static bool zp_ok(uint16_t param)
 {
     int16_t v = (int16_t)param;
@@ -429,6 +499,7 @@ static int exec_cmd(KnpuCtx *c, uint16_t cmd, uint16_t param,
     case KNPU_OP_STOP:
     case KNPU_OP_NOP:
     case KNPU_OP_CONV:
+    case KNPU_OP_ADD:
     case KNPU_OP_AVGPOOL:
     case KNPU_OP_DMA:
         if (param) {
@@ -442,6 +513,7 @@ static int exec_cmd(KnpuCtx *c, uint16_t cmd, uint16_t param,
         }
         break;
     case KNPU_SET_IFM_BASE:
+    case KNPU_SET_IFM2_BASE:
     case KNPU_SET_OFM_BASE:
     case KNPU_SET_WEIGHT_BASE:
     case KNPU_SET_BIAS_BASE:
@@ -466,6 +538,8 @@ static int exec_cmd(KnpuCtx *c, uint16_t cmd, uint16_t param,
         return KNPU_ERR_NONE;
     case KNPU_OP_CONV:
         return exec_conv(c);
+    case KNPU_OP_ADD:
+        return exec_add(c);
     case KNPU_OP_AVGPOOL:
         return exec_avgpool(c);
     case KNPU_OP_DMA:
@@ -478,11 +552,13 @@ static int exec_cmd(KnpuCtx *c, uint16_t cmd, uint16_t param,
         return KNPU_ERR_NONE;
 
     case KNPU_SET_IFM_ZP:
+    case KNPU_SET_IFM2_ZP:
     case KNPU_SET_OFM_ZP:
         if (!zp_ok(param)) {
             return KNPU_ERR_BAD_PARAM;
         }
-        *(cmd == KNPU_SET_IFM_ZP ? &st->ifm_zp : &st->ofm_zp) =
+        *(cmd == KNPU_SET_IFM_ZP ? &st->ifm_zp :
+          cmd == KNPU_SET_IFM2_ZP ? &st->ifm2_zp : &st->ofm_zp) =
             (int16_t)param;
         return KNPU_ERR_NONE;
     case KNPU_SET_KERNEL:
@@ -529,6 +605,9 @@ static int exec_cmd(KnpuCtx *c, uint16_t cmd, uint16_t param,
     case KNPU_SET_IFM_BASE:
         st->ifm_base = payload;
         return KNPU_ERR_NONE;
+    case KNPU_SET_IFM2_BASE:
+        st->ifm2_base = payload;
+        return KNPU_ERR_NONE;
     case KNPU_SET_OFM_BASE:
         st->ofm_base = payload;
         return KNPU_ERR_NONE;
@@ -550,6 +629,18 @@ static int exec_cmd(KnpuCtx *c, uint16_t cmd, uint16_t param,
             return KNPU_ERR_BAD_PARAM;
         }
         *(cmd == KNPU_SET_IFM_SHAPE ? &st->ifm : &st->ofm) = s;
+        return KNPU_ERR_NONE;
+    }
+    case KNPU_SET_IFM_SCALE:
+    case KNPU_SET_IFM2_SCALE:
+    case KNPU_SET_OFM_SCALE: {
+        int shift = (int16_t)param;
+        if (shift < -31 || shift > 0 || payload > 0x7FFFFFFFu) {
+            return KNPU_ERR_BAD_PARAM;
+        }
+        KnpuScale s = { (int32_t)payload, shift };
+        *(cmd == KNPU_SET_IFM_SCALE ? &st->ifm_scale :
+          cmd == KNPU_SET_IFM2_SCALE ? &st->ifm2_scale : &st->ofm_scale) = s;
         return KNPU_ERR_NONE;
     }
     case KNPU_SET_DMA_SRC:
@@ -578,10 +669,7 @@ static int exec_cmd(KnpuCtx *c, uint16_t cmd, uint16_t param,
         return KNPU_ERR_NONE;
 
     default:
-        /*
-         * Unknown commands, and for now also OP_ADD and the SET commands
-         * only it uses (IFM2_BASE, IFM2_ZP, *_SCALE).
-         */
+        /* Not reached: cmd_known() lets only the commands of spec 6.1 in */
         return KNPU_ERR_UNKNOWN_CMD;
     }
 }
@@ -589,15 +677,16 @@ static int exec_cmd(KnpuCtx *c, uint16_t cmd, uint16_t param,
 static bool cmd_known(uint16_t cmd)
 {
     switch (cmd) {
-    case KNPU_OP_STOP: case KNPU_OP_NOP: case KNPU_OP_CONV:
+    case KNPU_OP_STOP: case KNPU_OP_NOP: case KNPU_OP_CONV: case KNPU_OP_ADD:
     case KNPU_OP_AVGPOOL: case KNPU_OP_DMA:
     case KNPU_OP_DMA_WAIT: case KNPU_OP_KERNEL_WAIT:
-    case KNPU_SET_IFM_ZP: case KNPU_SET_OFM_ZP: case KNPU_SET_KERNEL:
-    case KNPU_SET_STRIDE: case KNPU_SET_PAD: case KNPU_SET_CLAMP:
-    case KNPU_SET_ROUND_MODE: case KNPU_SET_DMA_COUNT:
-    case KNPU_SET_IFM_BASE: case KNPU_SET_OFM_BASE:
+    case KNPU_SET_IFM_ZP: case KNPU_SET_IFM2_ZP: case KNPU_SET_OFM_ZP:
+    case KNPU_SET_KERNEL: case KNPU_SET_STRIDE: case KNPU_SET_PAD:
+    case KNPU_SET_CLAMP: case KNPU_SET_ROUND_MODE: case KNPU_SET_DMA_COUNT:
+    case KNPU_SET_IFM_BASE: case KNPU_SET_IFM2_BASE: case KNPU_SET_OFM_BASE:
     case KNPU_SET_WEIGHT_BASE: case KNPU_SET_BIAS_BASE:
     case KNPU_SET_RQ_TABLE: case KNPU_SET_IFM_SHAPE: case KNPU_SET_OFM_SHAPE:
+    case KNPU_SET_IFM_SCALE: case KNPU_SET_IFM2_SCALE: case KNPU_SET_OFM_SCALE:
     case KNPU_SET_DMA_SRC: case KNPU_SET_DMA_DST: case KNPU_SET_DMA_LEN:
     case KNPU_SET_DMA_STRIDE:
         return true;

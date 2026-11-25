@@ -131,23 +131,24 @@ tests/dt/check-dt.sh buildroot/dl/linux/linux-7.3.1.tar.xz
 ## NPU 공유 코어 시험
 
 `hw/npu-core/`는 [NPU 명세](docs/npu-spec.md)대로 명령열을 실행하는 공유
-코어이고, 나중에 QEMU 장치와 호스트 도구가 함께 쓴다. 지금은 합성곱(`OP_CONV`),
-평균 풀링(`OP_AVGPOOL`), DMA, 대기 명령과 그에 필요한 SET 명령을 구현했다.
-`OP_ADD`는 아직 `UNKNOWN_CMD`로 멈춘다.
+코어이고, QEMU 장치와 호스트 도구가 함께 쓴다. 합성곱(`OP_CONV`),
+덧셈(`OP_ADD`), 평균 풀링(`OP_AVGPOOL`), DMA, 대기 명령과 SET 명령까지 명세의
+명령을 모두 구현했다.
 
 호스트 시험에는 CMake, C/C++ 컴파일러, Python 3가 필요하다. 구성 단계에서
-고정한 커밋의 TensorFlow Lite Micro 파일 9개를 내려받아 SHA-256을 검사한다.
+고정한 커밋의 TensorFlow Lite Micro 파일 12개를 내려받아 SHA-256을 검사한다.
 
 ```bash
 make check-npu-core
 ```
 
-- V2: TFLite Micro 참조 합성곱을 이중·단일 반올림으로 한 번씩 빌드해
-  정답값을 만든다(`tflm_golden_double`, `tflm_golden_single`).
+- V2: TFLite Micro 참조 합성곱, 평균 풀링, 덧셈을 이중·단일 반올림으로 한
+  번씩 빌드해 정답값을 만든다(`tflm_golden_double`, `tflm_golden_single`).
 - V3: 어셈블러(`knpu_asm.py`)로 만든 명령열을 공유 코어(`knpu_run`)에서 실행해
   정답값과 바이트 단위로 비교한다. 1x1·3x3 커널, stride 1·2, VALID·SAME
-  패딩, 두 반올림 방식, 채널별 재양자화, 2-D DMA를 다룬다. 명세의 오류
-  코드와 `ERR_OFFSET`, 대기 누락이 내는 동기화 오류, 암묵 대기도 확인한다.
+  패딩, 두 반올림 방식, 채널별 재양자화, 2-D DMA, 덧셈의 입력 스케일링과
+  제자리 덧셈을 다룬다. 명세의 오류 코드와 `ERR_OFFSET`, 대기 누락이 내는
+  동기화 오류, 암묵 대기도 확인한다.
 
 ## NPU 장치 시험
 

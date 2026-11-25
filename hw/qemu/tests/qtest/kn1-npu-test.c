@@ -3,9 +3,9 @@
  *
  * Covers the registers (reset values, access rules), the completion and
  * error interrupts as seen by the GIC (SPI 32), jobs that move data
- * through the system bus (above 4 GiB as well), every implemented command,
- * the error paths, the performance counters, CTRL.SOFT_RESET and the
- * sram-size property. The arithmetic itself is checked bit for bit against
+ * through the system bus (above 4 GiB as well), every command, the error
+ * paths, the performance counters, CTRL.SOFT_RESET and the sram-size
+ * property. The arithmetic itself is checked bit for bit against
  * TensorFlow Lite Micro by the host tests of the qemu-npu-soc repository.
  *
  * Copyright (c) 2026 Kiwon Kwon
@@ -500,6 +500,79 @@ static void test_avgpool_job(void)
     qtest_quit(qts);
 }
 
+/*
+ * An addition of two 4x4x3 tensors with OP_ADD and the SET commands only
+ * it uses. After the left shift of 20, input 1 is scaled by 1/4, input 2
+ * by 1/2 and their sum by 2^-18, so that the output is exactly
+ * (in1 - zp1) + 2 * (in2 - zp2) + zp_out in either rounding mode; the
+ * clamp cuts both ends. Region 1: input 1 at 0x00, input 2 at 0x40
+ * (48 bytes each), output at 0x80. SRAM: inputs 0x000 and 0x100, output
+ * 0x200.
+ */
+static void test_add_job(void)
+{
+    QTestState *qts = start_machine("");
+    Prog p = { .n = 0 };
+    const int zp1 = 5, zp2 = -3, zp_out = -10, lo = -100, hi = 90;
+    int8_t in1[48], in2[48];
+    uint8_t out[48];
+    int i;
+
+    for (i = 0; i < 48; i++) {
+        in1[i] = (int8_t)((i * 37) % 255 - 127);
+        in2[i] = (int8_t)((i * 53 + 11) % 255 - 127);
+    }
+    qtest_memwrite(qts, REGION1_ADDR, in1, sizeof(in1));
+    qtest_memwrite(qts, REGION1_ADDR + 0x40, in2, sizeof(in2));
+    qtest_memset(qts, REGION1_ADDR + 0x80, 0x5a, sizeof(out));
+
+    set(&p, KNPU_SET_DMA_SRC, SPACE_REGION(1), 0);
+    set(&p, KNPU_SET_DMA_DST, SPACE_SRAM, 0);
+    set(&p, KNPU_SET_DMA_LEN, 0, sizeof(in1));
+    op(&p, KNPU_OP_DMA, 0);
+    set(&p, KNPU_SET_DMA_SRC, SPACE_REGION(1), 0x40);
+    set(&p, KNPU_SET_DMA_DST, SPACE_SRAM, 0x100);
+    op(&p, KNPU_OP_DMA, 0);
+    set(&p, KNPU_SET_IFM_BASE, 0, 0);
+    set(&p, KNPU_SET_IFM2_BASE, 0, 0x100);
+    set(&p, KNPU_SET_IFM_SHAPE, 3, 4 << 16 | 4);
+    op(&p, KNPU_SET_IFM_ZP, (uint16_t)zp1);
+    op(&p, KNPU_SET_IFM2_ZP, (uint16_t)zp2);
+    set(&p, KNPU_SET_IFM_SCALE, (uint16_t)-1, 1u << 30);
+    set(&p, KNPU_SET_IFM2_SCALE, 0, 1u << 30);
+    set(&p, KNPU_SET_OFM_BASE, 0, 0x200);
+    set(&p, KNPU_SET_OFM_SHAPE, 3, 4 << 16 | 4);
+    op(&p, KNPU_SET_OFM_ZP, (uint16_t)zp_out);
+    set(&p, KNPU_SET_OFM_SCALE, (uint16_t)-17, 1u << 30);
+    op(&p, KNPU_SET_CLAMP, (uint8_t)hi << 8 | (uint8_t)lo);
+    op(&p, KNPU_OP_DMA_WAIT, 0);
+    op(&p, KNPU_OP_ADD, 0);
+    set(&p, KNPU_SET_DMA_SRC, SPACE_SRAM, 0x200);
+    set(&p, KNPU_SET_DMA_DST, SPACE_REGION(1), 0x80);
+    set(&p, KNPU_SET_DMA_LEN, 0, sizeof(out));
+    op(&p, KNPU_OP_KERNEL_WAIT, 0);
+    op(&p, KNPU_OP_DMA, 0);
+    op(&p, KNPU_OP_STOP, 0);
+
+    set_regions(qts);
+    wr(qts, R_PERF_CTRL, PERF_ENABLE);
+    g_assert_cmphex(run(qts, &p), ==, STATUS_DONE);
+
+    qtest_memread(qts, REGION1_ADDR + 0x80, out, sizeof(out));
+    for (i = 0; i < 48; i++) {
+        int sum = (in1[i] - zp1) + 2 * (in2[i] - zp2) + zp_out;
+
+        g_assert_cmpint((int8_t)out[i], ==, MIN(MAX(sum, lo), hi));
+    }
+
+    /* Two DMAs in, one operation without MACs, one DMA out */
+    g_assert_cmpuint(rd64(qts, R_PERF_OPS), ==, 4);
+    g_assert_cmpuint(rd64(qts, R_PERF_MACS), ==, 0);
+    g_assert_cmpuint(rd64(qts, R_PERF_DMA_RD), ==, 2 * sizeof(in1));
+    g_assert_cmpuint(rd64(qts, R_PERF_DMA_WR), ==, sizeof(out));
+    qtest_quit(qts);
+}
+
 static void test_interrupts(void)
 {
     QTestState *qts = start_machine("");
@@ -765,6 +838,7 @@ int main(int argc, char **argv)
     qtest_add_func("kn1-npu/conv-job", test_conv_job);
     qtest_add_func("kn1-npu/all-commands", test_all_commands);
     qtest_add_func("kn1-npu/avgpool-job", test_avgpool_job);
+    qtest_add_func("kn1-npu/add-job", test_add_job);
     qtest_add_func("kn1-npu/interrupts", test_interrupts);
     qtest_add_func("kn1-npu/errors", test_errors);
     qtest_add_func("kn1-npu/perf-counters", test_perf_counters);

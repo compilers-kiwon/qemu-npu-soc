@@ -299,8 +299,9 @@ DMA는 SRAM 범위를, DRAM에서 SRAM으로 옮기면 쓰고 SRAM에서 DRAM으
 2. **SRAM 범위**(오류 `SRAM_RANGE`): 읽고 쓰는 모든 범위가
    `[0, SRAM_SIZE)` 안에 있어야 한다.
 3. **겹침**(오류 `BAD_PARAM`): OFM 범위가 그 연산이 읽는 범위와 겹치면 안
-   된다. 단, `OP_ADD`에서 `OFM_BASE`가 `IFM_BASE`나 `IFM2_BASE`와 정확히
-   같으면 허용한다(제자리 덧셈).
+   된다. 단, `OP_ADD`의 OFM 범위는 `*_BASE`가 `OFM_BASE`와 정확히 같은 입력
+   범위(IFM, IFM2)와는 겹쳐도 된다(제자리 덧셈). 다른 입력 범위와 일부만
+   겹치면 오류다.
 4. **재양자화 값**(오류 `BAD_PARAM`, `OP_CONV`만): 재양자화 표의 모든
    곱셈 계수가 0..2^31-1이고 모든 시프트가 -31..30이어야 한다.
 5. **동기화**(오류 `SYNC`): 9절.
@@ -322,7 +323,7 @@ TFLite의 `SAME`과 `VALID` 패딩은 모두 마지막 식을 정확히 만족�
 |------|----------------|-----------|-----------|
 | `OP_CONV` | — | IFM: `IH·IW·IC`, 가중치: `OC·KH·KW·IC`, bias: `4·OC`, 재양자화 표: `8·OC` | OFM: `OH·OW·OC` |
 | `OP_AVGPOOL` | OC = IC | IFM: `IH·IW·IC` | OFM: `OH·OW·OC` |
-| `OP_ADD` | `IFM_SHAPE` = `OFM_SHAPE` | IFM, IFM2: 각 `IH·IW·IC` | OFM: `OH·OW·OC` |
+| `OP_ADD` | 두 모양이 설정돼 있고 `IFM_SHAPE` = `OFM_SHAPE` | IFM, IFM2: 각 `IH·IW·IC` | OFM: `OH·OW·OC` |
 
 각 범위는 해당 `*_BASE`에서 시작한다. `OP_ADD`는 `KERNEL`, `STRIDE`, `PAD`를
 쓰지 않는다. IFM2의 모양은 IFM과 같다(브로드캐스트 없음).

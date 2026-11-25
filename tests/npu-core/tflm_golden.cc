@@ -1,8 +1,9 @@
 // V2: golden output of one int8 operation from the TensorFlow Lite Micro
-// reference kernels, a convolution (reference_integer_ops::ConvPerChannel)
-// or an average pooling (reference_integer_ops::AveragePool). The rounding
-// mode is fixed at build time by TFLITE_SINGLE_ROUNDING, so CMake builds
-// this file twice: tflm_golden_double and tflm_golden_single.
+// reference kernels, a convolution (reference_integer_ops::ConvPerChannel),
+// an average pooling (reference_integer_ops::AveragePool) or an addition
+// (reference_integer_ops::Add). The rounding mode is fixed at build time by
+// TFLITE_SINGLE_ROUNDING, so CMake builds this file twice:
+// tflm_golden_double and tflm_golden_single.
 //
 //   tflm_golden [--op conv] --ifm H,W,C --ofm H,W,C --kernel KH,KW
 //               --stride SH,SW --pad TOP,LEFT --ifm-zp Z --ofm-zp Z
@@ -11,10 +12,14 @@
 //   tflm_golden --op avgpool --ifm H,W,C --ofm H,W,C --kernel KH,KW
 //               --stride SH,SW --pad TOP,LEFT --clamp MIN,MAX --input F
 //               --output F
+//   tflm_golden --op add --ifm H,W,C --ifm-zp Z --ifm2-zp Z --ofm-zp Z
+//               --ifm-scale M,S --ifm2-scale M,S --ofm-scale M,S
+//               --clamp MIN,MAX --input F --input2 F --output F
 //
 // The binary files use the SRAM layouts of docs/npu-spec.md 7: NHWC int8
 // input, OHWI int8 weights, int32 bias and (multiplier, shift) int32 pairs,
-// all little endian. TFLite only uses the top and left padding.
+// all little endian. TFLite only uses the top and left padding. The two
+// inputs of an addition and its output have the same shape.
 //
 // SPDX-FileCopyrightText: 2026 Kiwon Kwon
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
@@ -29,6 +34,7 @@
 #include <string>
 #include <vector>
 
+#include "tensorflow/lite/micro/kernels/internal/reference/integer_ops/add.h"
 #include "tensorflow/lite/micro/kernels/internal/reference/integer_ops/conv.h"
 #include "tensorflow/lite/micro/kernels/internal/reference/integer_ops/pooling.h"
 
@@ -108,6 +114,45 @@ void Save(const std::string& path, const std::vector<int8_t>& data) {
   }
 }
 
+// An addition with the parameters TFLite Micro's add kernel fills for int8
+// (add_common.cc); the multipliers and shifts come from the caller.
+int RunAdd(std::map<std::string, std::string>& opt) {
+  Require(opt, {"--ifm", "--ifm-zp", "--ifm2-zp", "--ofm-zp", "--ifm-scale",
+                "--ifm2-scale", "--ofm-scale", "--clamp", "--input",
+                "--input2", "--output"});
+  const std::vector<int> ifm = Ints(opt["--ifm"], 3);
+  const std::vector<int> scale1 = Ints(opt["--ifm-scale"], 2);
+  const std::vector<int> scale2 = Ints(opt["--ifm2-scale"], 2);
+  const std::vector<int> scale_out = Ints(opt["--ofm-scale"], 2);
+  const std::vector<int> clamp = Ints(opt["--clamp"], 2);
+  const size_t size = static_cast<size_t>(ifm[0]) * ifm[1] * ifm[2];
+
+  std::vector<uint8_t> input1 = Load(opt["--input"], size);
+  std::vector<uint8_t> input2 = Load(opt["--input2"], size);
+  std::vector<int8_t> output(size);
+
+  tflite::ArithmeticParams params = {};
+  params.input1_offset = -Ints(opt["--ifm-zp"], 1)[0];
+  params.input2_offset = -Ints(opt["--ifm2-zp"], 1)[0];
+  params.output_offset = Ints(opt["--ofm-zp"], 1)[0];
+  params.left_shift = 20;
+  params.input1_multiplier = scale1[0];
+  params.input1_shift = scale1[1];
+  params.input2_multiplier = scale2[0];
+  params.input2_shift = scale2[1];
+  params.output_multiplier = scale_out[0];
+  params.output_shift = scale_out[1];
+  params.quantized_activation_min = clamp[0];
+  params.quantized_activation_max = clamp[1];
+
+  const tflite::RuntimeShape shape = Shape({1, ifm[0], ifm[1], ifm[2]});
+  tflite::micro::reference_integer_ops::Add(
+      params, shape, reinterpret_cast<const int8_t*>(input1.data()), shape,
+      reinterpret_cast<const int8_t*>(input2.data()), shape, output.data());
+  Save(opt["--output"], output);
+  return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -115,6 +160,7 @@ int main(int argc, char** argv) {
   for (int i = 1; i + 1 < argc; i += 2) opt[argv[i]] = argv[i + 1];
   if (argc % 2 != 1) Die("options come in pairs");
   const std::string op = opt.count("--op") ? opt["--op"] : "conv";
+  if (op == "add") return RunAdd(opt);
   if (op != "conv" && op != "avgpool") Die("unknown --op " + op);
   Require(opt, {"--ifm", "--ofm", "--kernel", "--stride", "--pad", "--clamp",
                 "--input", "--output"});

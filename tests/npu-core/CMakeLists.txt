@@ -3,7 +3,8 @@
 
 # Host tests of the kn1-npu shared core (docs/design.md 11):
 #   V2  tflm_golden_double / tflm_golden_single: TFLite Micro reference
-#       convolution and average pooling, built once per rounding mode
+#       convolution, average pooling and addition, built once per rounding
+#       mode
 #   V3  knpu_run executes command streams on hw/npu-core; the Python tests
 #       compare its results with V2 and check the error paths
 #
@@ -81,10 +82,13 @@ add_test(NAME v3_avgpool
          COMMAND Python3::Interpreter
                  ${CMAKE_CURRENT_SOURCE_DIR}/test_avgpool.py
                  ${TOOLS} --work-dir ${CMAKE_CURRENT_BINARY_DIR}/work-avgpool)
+add_test(NAME v3_add
+         COMMAND Python3::Interpreter ${CMAKE_CURRENT_SOURCE_DIR}/test_add.py
+                 ${TOOLS} --work-dir ${CMAKE_CURRENT_BINARY_DIR}/work-add)
 add_test(NAME v3_errors
          COMMAND Python3::Interpreter
                  ${CMAKE_CURRENT_SOURCE_DIR}/test_errors.py
                  --knpu-run $<TARGET_FILE:knpu_run>
                  --work-dir ${CMAKE_CURRENT_BINARY_DIR}/work-errors)
-set_tests_properties(v3_conv v3_avgpool v3_errors PROPERTIES
+set_tests_properties(v3_conv v3_avgpool v3_add v3_errors PROPERTIES
                      ENVIRONMENT PYTHONDONTWRITEBYTECODE=1)

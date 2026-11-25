@@ -8,11 +8,6 @@
  * caller (the QEMU device or a host tool), which also owns the SRAM and
  * reaches system memory through KnpuMemOps.
  *
- * Implemented so far: OP_STOP, OP_NOP, OP_CONV, OP_AVGPOOL, OP_DMA, the
- * two wait commands and the SET commands they use. OP_ADD and the SET
- * commands only it uses stop the job with KNPU_ERR_UNKNOWN_CMD until it is
- * implemented.
- *
  * Copyright (c) 2026 Kiwon Kwon
  *
  * SPDX-License-Identifier: MIT
