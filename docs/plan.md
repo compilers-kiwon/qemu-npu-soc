@@ -561,18 +561,126 @@ Micro와 비트 단위로 같다(V6). SRAM 크기 시연 결과를 문서로 남
 
 ## M4. 마무리
 
-- README: 프로젝트 소개, 구조, 빌드와 실행 방법, 결과(D19).
-- 검증기 부정 시험을 넓힌다.
-- 업스트림 형식 검사: QEMU와 리눅스 코드의 `checkpatch.pl`, 바인딩과 DT
-  스키마 검사.
-- 라이선스와 SPDX 점검(D18).
-- `knpu-compile`: SRAM 배치를 M3.6 이전 규칙(SRAM이 모자라면 가장 큰 선택부터
-  거둠)과 M3.6 규칙으로 각각 정해, 추정 사이클이 작은 쪽을 쓴다(같으면 M3.6
-  규칙). M3.6 규칙이 이전 규칙보다 느린 모델이 있기 때문이다(4 KiB 합성 모델
-  810개 중 19개, 최대 70사이클).
+M3.6에서 찾은 SRAM 배치 문제를 고치고, 드라이버 검증기의 부정 시험을 넓히고,
+업스트림 형식 검사와 라이선스 점검(D18)을 CI에 넣는다. 끝으로 README를
+정리하고, 새로 받은 저장소에서 README의 절차만으로 빌드와 데모가 되는지
+확인한다.
 
-완료 조건: 새로 받은 저장소에서 README의 절차만으로 빌드하고 ResNet-8
-데모를 돌릴 수 있다. CI가 모두 통과한다.
+완료 조건: 새로 받은 저장소에서 README의 절차만으로 빌드하고 ResNet-8 데모를
+돌릴 수 있다. CI가 모두 통과한다.
+
+### M4.1 SRAM 배치 규칙 선택 (V3, V4)
+
+- `knpu-schedule`의 옵션 `placement`: 기본값 `cost`는 M3.6의 규칙이고,
+  `largest`는 M3.6 이전(커밋 `484f090`)의 규칙이다. 이전 규칙은 활성값을
+  마지막으로 읽는 층까지 두거나 arena를 거치게 하고, 한 층 안의 버퍼를 만든
+  순서로만 놓으며, 들어가지 않으면 가장 큰 선택부터 거두고 되돌리지
+  않는다(설계 9.4절).
+- `knpu-compile`: tile 뒤의 모듈을 두 규칙으로 각각 스케줄하고 대기 삽입과
+  추정까지 거쳐, 추정 사이클이 작은 쪽을 쓴다(같으면 `cost`). M3.6 규칙이 이전
+  규칙보다 느린 모델이 있기 때문이다(4 KiB 합성 모델 810개 중 19개, 최대
+  70사이클). CPU 코드는 고른 쪽에서 한 번만 만든다. `--placement=cost`나
+  `--placement=largest`는 한 규칙으로 고정하고, `--report`는 다른 규칙의 총
+  추정 사이클도 찍는다.
+- V4: `placement=largest`의 lit 시험, 이전 규칙이 더 빠른 모델을
+  `knpu-compile`이 그 규칙으로 컴파일하는 lcc 시험(`compiler/test/lcc/`).
+
+완료 조건:
+
+- `placement=largest`인 `knpu-opt`가 `484f090`의 `knpu-opt`와 같은 MLIR을
+  낸다: M3.6에서 비교한 4 KiB 합성 모델 810개, 합성곱·MNIST·ResNet-8 모델의 V3
+  경우(SRAM 크기, 겹침 유무)마다.
+- `knpu-compile`이 쓰는 추정 사이클이 합성 모델 810개 모두 두 규칙 가운데 작은
+  쪽이고, 어느 모델도 `484f090`보다 크지 않다.
+- V3와 V4가 통과한다. 벡터 모델이 바뀌면 `make update-vectors`로 다시 만들고
+  README의 수치를 고친다.
+
+### M4.2 검증기 부정 시험 (V5)
+
+- `tests/driver/knpu_test.c`:
+  - 부정 사례마다 거부 이유를 확인한다. 시험 동안 `drm.debug`의 드라이버
+    메시지(0x2)를 켜고, 그 규칙의 메시지와 명령 오프셋이 커널 로그에 나오는지
+    본다. 끝나면 원래 값으로 되돌린다.
+  - 끝에서 잘린 페이로드의 사례를 페이로드 검사에 닿게 고친다(지금은 `OP_STOP`
+    뒤의 워드라는 규칙에 먼저 걸린다).
+  - 설계 8.4절의 규칙 가운데 시험이 없던 경우를 더한다: 페이로드 비트가 선 알
+    수 없는 명령, 앞 `OP_DMA` 뒤 바뀐 상태로 다시 `OP_DMA`, DST 쪽의 알 수
+    없는 공간 종류와 영역 번호, 4 GiB를 넘는 영역 끝(큰 오프셋, 큰 STRIDE), 한
+    영역에 `OP_DMA`가 여럿일 때의 최댓값, 마지막 영역 번호 7.
+  - 무작위 변형: 유효한 명령열의 워드를 고정 시드로 바꾸거나 지우거나 끼운
+    명령열 1,000개를 넣고, 시험 프로그램 안의 참조 검사기(설계 8.4절의 규칙)와
+    판정(수락·거부)과 거부한 명령의 오프셋을 비교한다. 어긋나면 시드, 변형
+    번호, 명령열을 찍는다.
+
+완료 조건:
+
+- V5가 통과한다. 부정 사례마다 기대한 규칙의 메시지가 커널 로그에 나오고,
+  무작위 변형 명령열 모두에서 커널과 참조 검사기의 판정이 같다.
+- 검증기의 규칙을 하나씩 일부러 끈 모듈로 돌리면 시험이 실패한다.
+
+### M4.3 업스트림 형식 검사 (CI)
+
+- `tests/style/checkpatch.sh`: 빌드가 받는 tarball(QEMU 11.1.3, Linux 7.3.1,
+  U-Boot v2026.10, TF-A v2.15.0)에서 `checkpatch.pl`과 그 업스트림의 설정만
+  임시 디렉터리에 풀고, 저장소 파일을 업스트림 트리의 경로에 복사해 각
+  업스트림의 규칙으로 검사한다. QEMU는 `hw/qemu/`, `hw/npu-core/`와 연결 패치,
+  리눅스는 `linux/`(드라이버, UAPI 헤더, DT, 바인딩), U-Boot는
+  `firmware/u-boot/`(U-Boot의 `.checkpatch.conf`), TF-A는
+  `firmware/tf-a/`(리눅스 `checkpatch.pl`과 TF-A의 `.checkpatch.conf`)다.
+  오류나 경고가 하나라도 나오면 실패하고, 허용하는 경고는 이유와 함께
+  스크립트에 적는다: `hw/npu-core/`의 MIT 라이선스 경고(D33), U-Boot 보드의
+  livetree API 경고 둘(업스트림 `qemu-arm` 보드와 같은 DRAM 설정 함수).
+- TF-A 포트의 경고(쓰지 않는 매크로 인자)를 고친다.
+- `make check-style`: tarball은 `buildroot/dl/`의 것을 쓰고, 없으면
+  Buildroot로 받는다.
+- push CI 작업 `checkpatch`: Buildroot의 내려받기 대상으로 tarball 넷을
+  받아(같은 `.hash`로 확인) 캐시하고 `make check-style`을 부른다. 바인딩과
+  DT의 스키마 검사는 M1.6부터 push CI의 dt-binding 작업이 돈다.
+
+완료 조건:
+
+- `make check-style`이 로컬과 push CI에서 통과한다.
+- 허용 목록 밖의 경고(예: 긴 줄)를 일부러 넣으면 네 업스트림 각각에서
+  실패한다.
+
+### M4.4 라이선스 점검 (CI)
+
+- `knpu`, `knpu-tests`, `knpu-runtime`, `knpu-models` 패키지: rsync 뒤 훅으로
+  쓰는 라이선스 전문을 빌드 디렉터리에 복사하고 `_LICENSE_FILES`로
+  가리킨다(설계 12.4절).
+- 야간 CI: 전체 빌드 뒤 `legal-info`를 돌려 이 저장소의 패키지에 경고가 있으면
+  실패한다.
+- `tests/license/check-licenses.py`: 파일마다의 SPDX 라이선스(머리글과
+  `REUSE.toml`)를 설계 12.4절의 경로별 표와 대조한다. 표에 적은 예외(MNIST
+  데이터는 CC-BY-SA-3.0, 사진은 CC0-1.0)만 받는다. `make check-licenses`와
+  push CI의 reuse-lint 작업이 부른다.
+
+완료 조건:
+
+- `legal-info`가 이 저장소의 패키지에 경고를 내지 않는다.
+- `make check-licenses`와 `reuse lint`가 로컬과 push CI에서 통과하고, 표와
+  다른 라이선스를 일부러 넣으면 표 검사가 실패한다.
+
+### M4.5 README와 새 저장소 확인
+
+- `make demo`: 이미지를 사람 손 없이 부팅해 64 KiB SRAM용 ResNet-8 모델(반올림
+  double)로 사진 열 장을 `knpu-infer`로 돌리고, 사진마다 top1의 클래스 이름과
+  정답값 일치 여부를 찍은 뒤 끈다(설계 10절).
+- README(D19): 소개 바로 뒤에 결과 요약(ResNet-8이 kn1-evb에서 TFLite Micro와
+  비트 단위로 같음, 정확도, 사진 분류, 사이클 추정)과 빠른 시작(clone, `make`,
+  `make demo`, `make test`)을 둔다. 빌드 절에 `hw/qemu/`나 `hw/npu-core/`를
+  바꾼 뒤 QEMU를 다시 빌드하는 방법(`make br-host-qemu-kn1-dirclean` 뒤
+  `make`)을, 데모 절에 `make demo`와 손으로 돌리는 절차를 적는다. M4.1~M4.4의
+  변경을 해당 절에 반영하고 현재 상태를 고친다.
+- 새 저장소 확인: GitHub에서 `git clone --recurse-submodules`로 새로 받은
+  저장소에서 README의 순서대로 `make`, `make demo`, `make test`,
+  `make check`를 돌린다. Buildroot의 내려받기도 새로 한다.
+
+완료 조건:
+
+- 새로 받은 저장소에서 README의 절차만으로 빌드하고, `make demo`가 사진 열
+  장의 top1과 정답값 일치를 찍는다. `make test`와 `make check`가 통과한다.
+- push CI와 야간 CI가 모두 통과한다.
 
 ---
 
