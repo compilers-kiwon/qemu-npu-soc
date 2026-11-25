@@ -37,7 +37,11 @@ public:
     // SET state after START (docs/npu-spec.md 5); bases and shapes are
     // treated as unknown so they are always set before their first use
     last[KNPU_SET_IFM_ZP] = {0, 0};
+    last[KNPU_SET_IFM2_ZP] = {0, 0};
     last[KNPU_SET_OFM_ZP] = {0, 0};
+    last[KNPU_SET_IFM_SCALE] = {0, 0};
+    last[KNPU_SET_IFM2_SCALE] = {0, 0};
+    last[KNPU_SET_OFM_SCALE] = {0, 0};
     last[KNPU_SET_KERNEL] = {0x0101, 0};
     last[KNPU_SET_STRIDE] = {0x0101, 0};
     last[KNPU_SET_PAD] = {0, 0};
@@ -122,6 +126,31 @@ public:
     set(KNPU_SET_OFM_SHAPE, out[2], (out[0] << 16) | out[1]);
     set(KNPU_SET_CLAMP, clampParam(p.getClamp()[0], p.getClamp()[1]));
     op(KNPU_OP_AVGPOOL);
+  }
+
+  /// OP_ADD has one shape for its IFM, IFM2 and OFM and uses neither
+  /// KERNEL, STRIDE nor PAD (docs/npu-spec.md 6.4, 8.3). A scale's shift
+  /// goes in PARAM as an int16 and its multiplier in the payload.
+  void elementwise(ElementwiseOp e) {
+    ArrayRef<int64_t> s = e.getShape();
+    auto scale = [&](uint16_t cmd, ArrayRef<int64_t> v) {
+      set(cmd, static_cast<uint16_t>(v[1]), static_cast<uint32_t>(v[0]));
+    };
+    set(KNPU_SET_IFM_BASE, 0, e.getIfm());
+    set(KNPU_SET_IFM_SHAPE, s[2], (s[0] << 16) | s[1]);
+    set(KNPU_SET_IFM_ZP, static_cast<uint16_t>(e.getIfmZp()));
+    scale(KNPU_SET_IFM_SCALE, e.getIfmScale());
+    set(KNPU_SET_IFM2_BASE, 0, e.getIfm2());
+    set(KNPU_SET_IFM2_ZP, static_cast<uint16_t>(e.getIfm2Zp()));
+    scale(KNPU_SET_IFM2_SCALE, e.getIfm2Scale());
+    set(KNPU_SET_OFM_BASE, 0, e.getOfm());
+    set(KNPU_SET_OFM_SHAPE, s[2], (s[0] << 16) | s[1]);
+    set(KNPU_SET_OFM_ZP, static_cast<uint16_t>(e.getOfmZp()));
+    scale(KNPU_SET_OFM_SCALE, e.getOfmScale());
+    set(KNPU_SET_CLAMP, clampParam(e.getClamp()[0], e.getClamp()[1]));
+    set(KNPU_SET_ROUND_MODE,
+        e.getRound() == "single" ? KNPU_ROUND_SINGLE : KNPU_ROUND_DOUBLE);
+    op(KNPU_OP_ADD);
   }
 
   std::vector<uint32_t> words;
@@ -216,6 +245,8 @@ LogicalResult mlir::knpu::writeModelFile(ModuleOp module,
       enc.conv(c);
     else if (auto p = dyn_cast<PoolOp>(op))
       enc.pool(p);
+    else if (auto e = dyn_cast<ElementwiseOp>(op))
+      enc.elementwise(e);
     else if (auto w = dyn_cast<DmaWaitOp>(op))
       enc.wait(KNPU_OP_DMA_WAIT, w.getPending());
     else if (auto w = dyn_cast<KernelWaitOp>(op))

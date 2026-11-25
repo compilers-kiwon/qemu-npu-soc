@@ -2,13 +2,13 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // RUN: not knpu-opt %s -split-input-file --knpu-estimate 2> %t.err | FileCheck %s
 // RUN: FileCheck %s --check-prefix=ERR < %t.err
-// RUN: not knpu-opt %s -split-input-file --knpu-estimate="macs-per-cycle=64 dma-bytes-per-cycle=8 pool-elements-per-cycle=32" 2>/dev/null | FileCheck %s --check-prefix=SLOW
+// RUN: not knpu-opt %s -split-input-file --knpu-estimate="macs-per-cycle=64 dma-bytes-per-cycle=8 pool-elements-per-cycle=32 add-elements-per-cycle=100" 2>/dev/null | FileCheck %s --check-prefix=SLOW
 // RUN: not knpu-opt %s -split-input-file --knpu-estimate="dma-bytes-per-cycle=0" 2>&1 | FileCheck %s --check-prefix=RATE
 
 // Cycle estimates worked out by hand (docs/design.md 9.1). By default a
-// cycle does 256 MACs, moves 16 DMA bytes or adds 256 pool elements;
-// lengths round up. The SLOW checks use 64 MACs, 8 bytes and 32 elements
-// per cycle.
+// cycle does 256 MACs, moves 16 DMA bytes, adds 256 pool elements or
+// computes 256 add elements; lengths round up. The SLOW checks use 64 MACs,
+// 8 bytes, 32 pool elements and 100 add elements per cycle.
 
 // The stream of docs/npu-spec.md 12. The constants (112 bytes, 7 cycles)
 // and the input (64 bytes, 4) load one after the other; the convolution
@@ -103,6 +103,41 @@ module attributes {knpu.sram_size = 65536 : i64} {
 // CHECK-NEXT: knpu.conv {{{.*}}knpu.cycles = array<i64: 7, 11>
 // CHECK-NEXT: knpu.kernel_wait 0
 // CHECK-NEXT: knpu.dma "store" {{.*}} {knpu.cycles = array<i64: 11, 13>}
+
+// -----
+
+// An addition takes its output elements over the add rate: 2*4*40 = 320
+// elements, 2 cycles (4 with the slow rate). It waits for its two input
+// loads (320 bytes, 20 cycles each) and the store for it.
+
+module attributes {knpu.sram_size = 65536 : i64} {
+  func.func @knpu_model() {
+    knpu.dma "load" region 1 [0] sram [0] length 320 count 1 stride 0
+    knpu.dma "load" region 1 [320] sram [320] length 320 count 1 stride 0
+    knpu.dma_wait 0
+    knpu.elementwise {ifm = 0 : i64, ifm2 = 320 : i64, ofm = 640 : i64, shape = array<i64: 2, 4, 40>, ifm_zp = 0 : i64, ifm2_zp = 0 : i64, ofm_zp = 0 : i64, ifm_scale = array<i64: 1073741824, 0>, ifm2_scale = array<i64: 1073741824, 0>, ofm_scale = array<i64: 1073741824, -19>, clamp = array<i64: -128, 127>, round = "double"}
+    knpu.kernel_wait 0
+    knpu.dma "store" region 1 [640] sram [640] length 320 count 1 stride 0
+    knpu.stop
+    return
+  }
+}
+
+// CHECK-LABEL: func.func @knpu_model() attributes {knpu.total_cycles = 62 : i64}
+// CHECK-NEXT: knpu.dma "load" {{.*}} {knpu.cycles = array<i64: 0, 20>}
+// CHECK-NEXT: knpu.dma "load" {{.*}} {knpu.cycles = array<i64: 20, 40>}
+// CHECK-NEXT: knpu.dma_wait 0
+// CHECK-NEXT: knpu.elementwise {{{.*}}knpu.cycles = array<i64: 40, 42>
+// CHECK-NEXT: knpu.kernel_wait 0
+// CHECK-NEXT: knpu.dma "store" {{.*}} {knpu.cycles = array<i64: 42, 62>}
+
+// SLOW-LABEL: func.func @knpu_model() attributes {knpu.total_cycles = 124 : i64}
+// SLOW-NEXT: knpu.dma "load" {{.*}} {knpu.cycles = array<i64: 0, 40>}
+// SLOW-NEXT: knpu.dma "load" {{.*}} {knpu.cycles = array<i64: 40, 80>}
+// SLOW-NEXT: knpu.dma_wait 0
+// SLOW-NEXT: knpu.elementwise {{{.*}}knpu.cycles = array<i64: 80, 84>
+// SLOW-NEXT: knpu.kernel_wait 0
+// SLOW-NEXT: knpu.dma "store" {{.*}} {knpu.cycles = array<i64: 84, 124>}
 
 // -----
 

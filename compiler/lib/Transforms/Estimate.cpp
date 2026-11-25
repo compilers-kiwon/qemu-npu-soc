@@ -56,7 +56,8 @@ public:
                        "(run knpu-schedule first)");
       return signalPassFailure();
     }
-    if (macsPerCycle < 1 || dmaBytesPerCycle < 1 || poolElementsPerCycle < 1) {
+    if (macsPerCycle < 1 || dmaBytesPerCycle < 1 || poolElementsPerCycle < 1 ||
+        addElementsPerCycle < 1) {
       module.emitError("knpu-estimate rates must be positive");
       return signalPassFailure();
     }
@@ -95,6 +96,10 @@ public:
         queue = &kernel;
         length = ceilDiv(out[0] * out[1] * out[2] * k[0] * k[1],
                          poolElementsPerCycle);
+      } else if (auto e = dyn_cast<ElementwiseOp>(op)) {
+        ArrayRef<int64_t> s = e.getShape();
+        queue = &kernel;
+        length = ceilDiv(s[0] * s[1] * s[2], addElementsPerCycle);
       } else {
         continue;
       }

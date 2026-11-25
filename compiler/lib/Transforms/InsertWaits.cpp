@@ -90,6 +90,16 @@ Job describe(PoolOp op) {
   return j;
 }
 
+Job describe(ElementwiseOp op) {
+  Job j;
+  ArrayRef<int64_t> s = op.getShape();
+  int64_t n = s[0] * s[1] * s[2];
+  int64_t ifm = op.getIfm(), ifm2 = op.getIfm2(), ofm = op.getOfm();
+  j.reads = {{ifm, ifm + n}, {ifm2, ifm2 + n}};
+  j.writes = {{ofm, ofm + n}};
+  return j;
+}
+
 void drain(std::deque<Job> &queue, int64_t pending) {
   while (static_cast<int64_t>(queue.size()) > pending)
     queue.pop_front();
@@ -128,6 +138,8 @@ public:
         job = describe(c);
       else if (auto p = dyn_cast<PoolOp>(op))
         job = describe(p);
+      else if (auto e = dyn_cast<ElementwiseOp>(op))
+        job = describe(e);
       else
         continue;
       bool isDma = isa<DmaOp>(op);

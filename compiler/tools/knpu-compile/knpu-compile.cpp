@@ -12,7 +12,8 @@
 //                [--overlap=false] [--report] [--emit-mlir]
 //                [--emit-cpu-mlir] [--insert-waits=false]
 //                [--macs-per-cycle=N] [--dma-bytes-per-cycle=N]
-//                [--pool-elements-per-cycle=N] [--lcc-opt=PATH]
+//                [--pool-elements-per-cycle=N]
+//                [--add-elements-per-cycle=N] [--lcc-opt=PATH]
 //                [--mlir-translate=PATH] [--clang=PATH] [--ld-lld=PATH]
 
 #include "knpu/Dialect/Knpu/KnpuDialect.h"
@@ -79,6 +80,10 @@ static cl::opt<int64_t> poolElementsPerCycle(
     "pool-elements-per-cycle",
     cl::desc("Cycle estimate: average pooling window elements per cycle"),
     cl::init(256));
+static cl::opt<int64_t> addElementsPerCycle(
+    "add-elements-per-cycle",
+    cl::desc("Cycle estimate: addition output elements per cycle"),
+    cl::init(256));
 // The tools of the CPU code; CMake puts in the ones it built and found
 static cl::opt<std::string> lccOpt("lcc-opt", cl::desc("lcc-opt to run"),
                                    cl::value_desc("path"),
@@ -115,10 +120,12 @@ static void printReport(ModuleOp module, llvm::raw_ostream &os) {
   llvm::MapVector<StringRef, Row> rows;
   for (Operation &op : fn.getBody().front()) {
     auto cycles = op.getAttrOfType<DenseI64ArrayAttr>(knpu::kCyclesAttr);
-    if (!cycles || !isa<knpu::ConvOp, knpu::PoolOp>(op))
+    if (!cycles || !isa<knpu::ConvOp, knpu::PoolOp, knpu::ElementwiseOp>(op))
       continue;
     Row &row = rows[layerName(op.getLoc())];
-    row.op = isa<knpu::ConvOp>(op) ? "conv" : "pool";
+    row.op = isa<knpu::ConvOp>(op)   ? "conv"
+             : isa<knpu::PoolOp>(op) ? "pool"
+                                     : "add";
     ++row.tiles;
     if (row.opStart < 0)
       row.opStart = cycles[0];
@@ -141,8 +148,8 @@ static void printReport(ModuleOp module, llvm::raw_ostream &os) {
                      : std::to_string(start) + ".." + std::to_string(end);
   };
   os << "estimated cycles (" << macsPerCycle << " MACs, " << dmaBytesPerCycle
-     << " DMA bytes, " << poolElementsPerCycle
-     << " pool elements per cycle; "
+     << " DMA bytes, " << poolElementsPerCycle << " pool elements, "
+     << addElementsPerCycle << " add elements per cycle; "
      << (overlap ? "overlapped" : "serial") << " schedule, " << sramSize
      << "-byte SRAM)\n";
   os << llvm::format("  %-12s %-5s %5s %13s %10s %13s\n", "layer", "op",
@@ -214,6 +221,7 @@ int main(int argc, char **argv) {
   estimateOptions.macsPerCycle = macsPerCycle;
   estimateOptions.dmaBytesPerCycle = dmaBytesPerCycle;
   estimateOptions.poolElementsPerCycle = poolElementsPerCycle;
+  estimateOptions.addElementsPerCycle = addElementsPerCycle;
   pm.addPass(knpu::createKnpuEstimate(estimateOptions));
   if (failed(pm.run(*module)))
     return 1;

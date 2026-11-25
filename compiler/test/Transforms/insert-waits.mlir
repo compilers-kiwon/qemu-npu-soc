@@ -138,3 +138,37 @@ module attributes {knpu.sram_size = 65536 : i64} {
 // CHECK-NEXT: knpu.kernel_wait 0
 // CHECK-NEXT: knpu.dma "store"
 // CHECK-NEXT: knpu.stop
+
+// -----
+
+// An addition reads its IFM and IFM2 and writes its OFM. It waits for both
+// input loads. The third load overwrites only the first addition's IFM2,
+// so it waits for that addition; the second addition waits for that load,
+// and the store of both outputs waits only for the second addition (the
+// first is done).
+
+module attributes {knpu.sram_size = 65536 : i64} {
+  func.func @knpu_model() {
+    knpu.dma "load" region 1 [0] sram [0] length 32 count 1 stride 0
+    knpu.dma "load" region 1 [32] sram [32] length 32 count 1 stride 0
+    knpu.elementwise {ifm = 0 : i64, ifm2 = 32 : i64, ofm = 64 : i64, shape = array<i64: 4, 4, 2>, ifm_zp = 0 : i64, ifm2_zp = 0 : i64, ofm_zp = 0 : i64, ifm_scale = array<i64: 1073741824, 0>, ifm2_scale = array<i64: 1073741824, 0>, ofm_scale = array<i64: 1073741824, -19>, clamp = array<i64: -128, 127>, round = "double"}
+    knpu.dma "load" region 1 [64] sram [32] length 32 count 1 stride 0
+    knpu.elementwise {ifm = 0 : i64, ifm2 = 32 : i64, ofm = 96 : i64, shape = array<i64: 4, 4, 2>, ifm_zp = 0 : i64, ifm2_zp = 0 : i64, ofm_zp = 0 : i64, ifm_scale = array<i64: 1073741824, 0>, ifm2_scale = array<i64: 1073741824, 0>, ofm_scale = array<i64: 1073741824, -19>, clamp = array<i64: -128, 127>, round = "double"}
+    knpu.dma "store" region 1 [96] sram [64] length 64 count 1 stride 0
+    knpu.stop
+    return
+  }
+}
+
+// CHECK-LABEL: func.func @knpu_model
+// CHECK-NEXT: knpu.dma "load" region 1[0]
+// CHECK-NEXT: knpu.dma "load" region 1[32]
+// CHECK-NEXT: knpu.dma_wait 0
+// CHECK-NEXT: knpu.elementwise {{{.*}}ofm = 64
+// CHECK-NEXT: knpu.kernel_wait 0
+// CHECK-NEXT: knpu.dma "load" region 1[64]
+// CHECK-NEXT: knpu.dma_wait 0
+// CHECK-NEXT: knpu.elementwise {{{.*}}ofm = 96
+// CHECK-NEXT: knpu.kernel_wait 0
+// CHECK-NEXT: knpu.dma "store"
+// CHECK-NEXT: knpu.stop

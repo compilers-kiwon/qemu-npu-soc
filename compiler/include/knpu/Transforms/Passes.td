@@ -97,11 +97,12 @@ def KnpuEstimate : Pass<"knpu-estimate", "::mlir::ModuleOp"> {
     order and waits only when a queue is full or at a wait command; each
     queue runs its jobs one after another. A DMA takes its bytes divided by
     `dma-bytes-per-cycle`, a convolution its nominal MACs divided by
-    `macs-per-cycle` and an average pooling its window elements
-    (OH*OW*C*KH*KW) divided by `pool-elements-per-cycle`, rounded up. The
-    rates are assumptions for comparing schedules, not those of a chip.
-    Every DMA and operation command gets `knpu.cycles` (start, end) and the
-    model function `knpu.total_cycles`, the cycle the job ends at.
+    `macs-per-cycle`, an average pooling its window elements
+    (OH*OW*C*KH*KW) divided by `pool-elements-per-cycle` and an addition
+    its output elements (H*W*C) divided by `add-elements-per-cycle`, rounded
+    up. The rates are assumptions for comparing schedules, not those of a
+    chip. Every DMA and operation command gets `knpu.cycles` (start, end)
+    and the model function `knpu.total_cycles`, the cycle the job ends at.
   }];
   let options = [
     Option<"macsPerCycle", "macs-per-cycle", "int64_t", "256",
@@ -110,6 +111,8 @@ def KnpuEstimate : Pass<"knpu-estimate", "::mlir::ModuleOp"> {
            "Bytes a DMA moves per cycle">,
     Option<"poolElementsPerCycle", "pool-elements-per-cycle", "int64_t",
            "256", "Window elements an average pooling adds per cycle">,
+    Option<"addElementsPerCycle", "add-elements-per-cycle", "int64_t",
+           "256", "Output elements an addition computes per cycle">,
   ];
 }
 
