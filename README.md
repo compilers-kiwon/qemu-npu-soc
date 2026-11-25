@@ -364,6 +364,86 @@ LCCDIR=$L $L/lcc -Wf-pragma=knpu -S mnist.c -o mnist.mlir
 build/compiler/bin/knpu-compile --sram-size=32768 --report mnist.mlir -o mnist.knpu
 ```
 
+## ResNet-8
+
+M3은 MLPerf Tiny의 이미지 분류 모델 ResNet-8(설계 6.6절)을 모든 층에
+관통시킨다. `models/resnet8/make_model.py`는 MLPerf Tiny 학습 스크립트의
+구조(필터 26개)를 이 저장소의 코드로 쓰고, 그 학습 방법(500 epoch)대로
+TensorFlow 2.21.0으로 CIFAR-10에서 학습해 int8로 바꾼다. 그 결과인
+`models/resnet8/resnet8.tflite`는 입력이 32x32x3이고 층은 합성곱 아홉, 잔차
+덧셈 셋, 평균 풀링, FC, softmax이며, MAC 32,562,192개와 파라미터 203,746개다.
+CIFAR-10 시험 집합 10,000장의 정확도는 float 모델이 88.02%, int8 모델이
+87.63%다.
+
+### SRAM 크기와 사이클 추정
+
+같은 모델을 SRAM 128, 64, 32 KiB로, 겹침을 켜고(기본) 끄고(`--overlap=false`)
+컴파일했다. 컴파일한 모델의 NPU 부분을 공유 코어에서, CPU 부분을
+qemu-aarch64에서 돌리면(V3), 여섯 경우 모두 두 반올림 방식에서 시험 입력
+열다섯(`models/resnet8/photos/`의 사진 열 장, 무작위 셋, 전부 -128, 전부
+127)의 출력이 TFLite Micro와 비트 단위로 같다. 추정 사이클은 `--report`의
+값이고(가정값은 MNIST CNN 절과 같고, 덧셈은 사이클당 출력 원소 256개), 나머지
+열은 V3에서 공유 코어가 센 카운터다. `PERF_OPS`는 연산 명령과 DMA 명령의 수다.
+값은 두 반올림 방식이 같다.
+
+| SRAM | 겹침 | 추정 사이클 | `PERF_DMA_RD_BYTES` | `PERF_DMA_WR_BYTES` | `PERF_OPS` |
+|------|------|-------------|---------------------|---------------------|------------|
+| 128 KiB | 있음 | 138,192 | 226,320 | 13,322 | 28 |
+| 128 KiB | 없음 | 168,189 | 466,040 | 186,482 | 55 |
+| 64 KiB | 있음 | 153,108 | 361,936 | 106,506 | 74 |
+| 64 KiB | 없음 | 168,243 | 466,872 | 186,482 | 69 |
+| 32 KiB | 있음 | 155,251 | 495,888 | 173,066 | 247 |
+| 32 KiB | 없음 | 169,139 | 481,016 | 186,482 | 137 |
+
+층 이름은 `--report`가 찍는 이름이다. layer1~layer4는 32x32x26,
+layer5~layer8은 16x16x52, layer9~layer12는 8x8x104를 내고, 묶음마다 마지막
+층이 잔차 덧셈이다. layer7과 layer11은 잔차 연결의 채널 수와 크기를 맞추는 1x1
+합성곱(stride 2), layer13은 평균 풀링, layer14는 FC다. 겹침이 있을 때 층을
+나눈 방법과 활성값을 둔 곳은 다음과 같다. 겹침이 없으면 같은 층을 나누되,
+버퍼가 한 벌씩이라 타일이 더 크다.
+
+- 128 KiB: 모든 층이 타일 하나다. 두 층 뒤의 덧셈 layer4도 읽는 layer1의
+  출력처럼 여러 층이 읽는 활성값도 마지막으로 읽는 층까지 SRAM에 남는다. SRAM
+  배치가 들어가도록 layer6의 출력(layer8이 읽는다)만 arena를 거치게 했고, DMA
+  쓰기 13,322바이트는 이 출력과 logits 10바이트다.
+- 64 KiB: 덧셈 layer4를 출력 행 타일 셋으로, 합성곱 layer9를 넷으로 나누고,
+  가중치만 97,344바이트인 layer10(3x3, 104->104)을 출력 채널 타일 넷(29, 29,
+  29, 17채널)으로 나눈다. 채널 타일들은 한 번 읽어 둔 입력을 함께 쓰고, 출력은
+  2-D DMA로 arena에 쓴다. 타일로 나뉜 층이 쓰거나 읽는 활성값(layer4, layer9,
+  layer10의 출력과 layer1, layer3, layer8의 출력)은 arena를 거친다. 그 가운데
+  layer1의 출력은 layer2가 SRAM에서 그대로 읽는 동안 arena로도 써서 layer4가
+  읽는다.
+- 32 KiB: layer2~layer8 일곱 층을 출력 행 타일로(layer6은 한 행씩 열여섯),
+  layer9와 layer10을 출력 채널 타일 일곱과 아홉으로 나눈다. SRAM에 남는
+  활성값은 layer11~layer13의 출력뿐이다.
+
+겹침이 없으면 모든 층의 출력이 arena를 거치므로 DMA 쓰기는 SRAM 크기와
+관계없이 186,482바이트다. 어느 경우든 상수(가중치, bias, 재양자화 표)
+209,936바이트는 한 번씩만 읽고, 나머지 읽기는 입력과 arena를 거친 활성값이다.
+32 KiB에서는 겹침이 있을 때 읽기가 더 많은데, 입력과 출력을 두 벌씩 두느라 행
+타일이 작아져 이웃한 타일이 함께 읽는 입력 행이 늘기 때문이다.
+
+연산 명령만 따지면 어느 경우든 127,405~127,412사이클(타일마다 올림)이고,
+나머지는 NPU가 DMA를 기다린 사이클이다. 겹침이 없으면 DMA가 연산과 겹치지
+않는다. 겹침이 있을 때 128 KiB에서 기다린 10,787사이클 가운데 9,698은 layer9,
+layer10, layer11 앞에서 그 층의 상수(49,920, 98,592, 6,656바이트)를 읽는
+DMA다. layer10의 상수는 layer9의 버퍼와 함께 128 KiB에 들어가지 않고, layer9와
+layer11의 상수는 SRAM 배치가 들어가도록 미리 읽기를 거둔 것이다. SRAM이
+작을수록 타일로 나뉘는 층이 늘고 그 층이 쓰거나 읽는 활성값이 arena를
+거치므로, DMA 바이트와 추정 사이클이 128 KiB, 64 KiB, 32 KiB 순으로 는다.
+
+층별 보고는 MNIST CNN 절과 같은 순서로 컴파일하고, `--sram-size`와
+`--overlap=false`로 표의 경우를 고른다.
+
+```bash
+L=build/compiler/deps/lcc-v4.2-llvm.3-mlir-aarch64-linux
+build/py-venv/bin/python3 compiler/tflite2c/tflite2c.py \
+    --schema build/compiler/deps/schema_py_generated.py --round double \
+    models/resnet8/resnet8.tflite -o resnet8.c
+LCCDIR=$L $L/lcc -Wf-pragma=knpu -S resnet8.c -o resnet8.mlir
+build/compiler/bin/knpu-compile --sram-size=32768 --report resnet8.mlir -o resnet8.knpu
+```
+
 ## CI
 
 GitHub Actions에서는 push마다 defconfig, `check-package`, `reuse lint`,
@@ -378,7 +458,7 @@ NPU 공유 코어 시험(V2, V3), 모델 컴파일러 시험(V2~V4), 런타임 �
 |----------|------|------|
 | M1 | 합성곱 하나를 모든 층에 관통시킨다 | 끝났다. M1.1 저장소 뼈대, M1.2 펌웨어 체인 부팅(QEMU 머신, 디바이스 트리, TF-A, U-Boot, 리눅스 셸), M1.3 NPU 명세 v0([docs/npu-spec.md](docs/npu-spec.md)), M1.4 NPU 공유 코어와 정답값 비교(V2, V3), M1.5 QEMU NPU 장치(V1), M1.6 `knpu` 드라이버(V5), M1.7 모델 컴파일러 최소 경로(V2~V4), M1.8 런타임과 끝-끝 시험(V6) |
 | M2 | MNIST CNN | 끝났다. M2.1 MNIST 모델과 정답값(V2), M2.2 공유 코어의 `OP_AVGPOOL`(V1~V3), M2.3 생성기의 새 연산과 softmax(V2), M2.4 컴파일러 NPU 경로와 사이클 추정(V3, V4), M2.5 컴파일러 CPU 경로와 lcc-opt(V3, V4), M2.6 런타임의 CPU 단계와 top-1, M2.7 커널 설정 `kn1_defconfig`, M2.8 끝-끝 시험(V6)과 사이클 추정 보고 |
-| M3 | MLPerf Tiny ResNet-8 | 시작 전 |
+| M3 | MLPerf Tiny ResNet-8 | 진행 중. 끝난 단계: M3.1 ResNet-8 모델과 정답값(V2), M3.2 공유 코어의 `OP_ADD`(V1~V3), M3.3 생성기의 ADD와 잔차 연결(V2), M3.4 컴파일러의 ADD와 두 입력 층(V3, V4), M3.5 컴파일러의 출력 채널 타일과 2-D DMA(V3, V4), M3.6 SRAM 배치 개선과 SRAM 크기 시연(V3, V4). 남은 단계: M3.7 끝-끝 시험(V6) |
 | M4 | 마무리: 새로 받은 저장소에서 README만으로 빌드와 데모 | 시작 전 |
 
 ## 라이선스
