@@ -286,3 +286,203 @@ func.func @knpu_model(
          tensor<1x2xi32>) -> tensor<1x2x2x1xi8>
   return %1 : tensor<1x2x2x1xi8>
 }
+
+// -----
+
+// A residual connection (M3): %0 feeds the second conv and the add, so it
+// stays in SRAM (at 48) until the add, like the second conv's output (at
+// 64); the add reads both there and writes its own buffer (at 0, where the
+// second conv's constants were), never in place. Serially (SERIAL) the add
+// loads both inputs from the arena.
+
+func.func @knpu_model(
+    %in: tensor<1x2x2x1xi8> {knpu.scale = 1.0 : f32, knpu.zero_point = 0 : i64})
+    -> (tensor<1x2x2x2xi8> {knpu.scale = 1.0 : f32, knpu.zero_point = -128 : i64}) {
+  %w1 = arith.constant dense<1> : tensor<2x1x1x1xi8>
+  %w2 = arith.constant dense<2> : tensor<2x1x1x2xi8>
+  %b = arith.constant dense<0> : tensor<2xi32>
+  %rq = arith.constant dense<1073741824> : tensor<2x2xi32>
+  %0 = knpu.conv2d %in, %w1, %b, %rq {stride = array<i64: 1, 1>,
+      pad = array<i64: 0, 0, 0, 0>, input_zp = 0 : i64, output_zp = 3 : i64,
+      clamp = array<i64: -128, 127>, round = "single"}
+      : (tensor<1x2x2x1xi8>, tensor<2x1x1x1xi8>, tensor<2xi32>,
+         tensor<2x2xi32>) -> tensor<1x2x2x2xi8>
+  %1 = knpu.conv2d %0, %w2, %b, %rq {stride = array<i64: 1, 1>,
+      pad = array<i64: 0, 0, 0, 0>, input_zp = 3 : i64, output_zp = -4 : i64,
+      clamp = array<i64: -128, 127>, round = "single"}
+      : (tensor<1x2x2x2xi8>, tensor<2x1x1x2xi8>, tensor<2xi32>,
+         tensor<2x2xi32>) -> tensor<1x2x2x2xi8>
+  %2 = knpu.add %0, %1 {input_zp = 3 : i64, input2_zp = -4 : i64,
+      output_zp = -128 : i64, input_scale = array<i64: 1073741824, 0>,
+      input2_scale = array<i64: 1359676495, -2>,
+      output_scale = array<i64: 1127607261, -17>,
+      clamp = array<i64: -128, 127>, round = "single"}
+      : (tensor<1x2x2x2xi8>, tensor<1x2x2x2xi8>) -> tensor<1x2x2x2xi8>
+  return %2 : tensor<1x2x2x2xi8>
+}
+
+// CHECK-LABEL: module attributes {knpu.sram_size = 4096 : i64}
+// CHECK: knpu.region 1 "arena" size 24
+// CHECK: knpu.io "output" region 1[16] shape [1, 2, 2, 2]
+// CHECK-LABEL: func.func @knpu_model() {
+// CHECK-NEXT: knpu.dma "load" region 0[0] sram[64] length 48
+// CHECK-NEXT: knpu.dma "load" region 1[0] sram[112] length 4
+// CHECK-NEXT: knpu.dma "load" region 0[48] sram[0] length 48
+// CHECK-NEXT: knpu.conv {{{.*}}ifm = 112 : i64{{.*}}ofm = 48 : i64{{.*}}weight = 64 : i64}
+// CHECK-NEXT: knpu.conv {{{.*}}ifm = 48 : i64{{.*}}ofm = 64 : i64{{.*}}weight = 0 : i64}
+// CHECK-NEXT: knpu.elementwise {clamp = array<i64: -128, 127>, ifm = 48 : i64, ifm2 = 64 : i64, ifm2_scale = array<i64: 1359676495, -2>, ifm2_zp = -4 : i64, ifm_scale = array<i64: 1073741824, 0>, ifm_zp = 3 : i64, ofm = 0 : i64, ofm_scale = array<i64: 1127607261, -17>, ofm_zp = -128 : i64, round = "single", shape = array<i64: 2, 2, 2>}
+// CHECK-NEXT: knpu.dma "store" region 1[16] sram[0] length 8
+// CHECK-NEXT: knpu.stop
+
+// SERIAL: knpu.io "output" region 1[48] shape [1, 2, 2, 2] scale 1.000000e+00 zero_point -128
+// SERIAL: knpu.dma "store" region 1[32] sram[64] length 8
+// SERIAL-NEXT: knpu.dma "load" region 1[16] sram[0] length 8
+// SERIAL-NEXT: knpu.dma "load" region 1[32] sram[16] length 8
+// SERIAL-NEXT: knpu.elementwise {{{.*}}ifm = 0 : i64, ifm2 = 16 : i64{{.*}}ofm = 32 : i64
+// SERIAL-NEXT: knpu.dma "store" region 1[48] sram[32] length 8
+// SERIAL-NEXT: knpu.stop
+
+// -----
+
+// An add of a tensor to itself loads it once and reads it as both inputs.
+
+func.func @knpu_model(
+    %in: tensor<1x2x2x4xi8> {knpu.scale = 1.0 : f32, knpu.zero_point = 0 : i64})
+    -> (tensor<1x2x2x4xi8> {knpu.scale = 1.0 : f32, knpu.zero_point = 0 : i64}) {
+  %0 = knpu.add %in, %in {input_zp = 0 : i64, input2_zp = 0 : i64,
+      output_zp = 0 : i64, input_scale = array<i64: 1073741824, 0>,
+      input2_scale = array<i64: 1073741824, 0>,
+      output_scale = array<i64: 1073741824, -19>,
+      clamp = array<i64: -128, 127>, round = "double"}
+      : (tensor<1x2x2x4xi8>, tensor<1x2x2x4xi8>) -> tensor<1x2x2x4xi8>
+  return %0 : tensor<1x2x2x4xi8>
+}
+
+// CHECK-LABEL: module attributes {knpu.sram_size = 4096 : i64}
+// CHECK-LABEL: func.func @knpu_model() {
+// CHECK-NEXT: knpu.dma "load" region 1[0] sram[0] length 16
+// CHECK-NEXT: knpu.elementwise {{{.*}}ifm = 0 : i64, ifm2 = 0 : i64{{.*}}ofm = 16 : i64
+// CHECK-NEXT: knpu.dma "store" region 1[16] sram[16] length 16
+// CHECK-NEXT: knpu.stop
+
+// SERIAL: knpu.io "output" region 1[16] shape [1, 2, 2, 4]
+// SERIAL: knpu.dma "load" region 1[0] sram[0] length 16
+// SERIAL-NEXT: knpu.elementwise {{{.*}}ifm = 0 : i64, ifm2 = 0 : i64{{.*}}ofm = 16 : i64
+// SERIAL-NEXT: knpu.dma "store" region 1[16] sram[16] length 16
+
+// -----
+
+// An add in two tiles of two rows, as knpu-tile will make them (M3.5): a
+// tile reads the same rows of both inputs. The conv output goes through the
+// arena because tiles read it. With overlap the inputs are double-buffered
+// (rows 0-1 at 0 and 128, rows 2-3 at 64 and 192, loaded before the first
+// tile's add); serially each tile loads its rows of both inputs.
+
+func.func @knpu_model(
+    %in: tensor<1x4x4x8xi8> {knpu.scale = 1.0 : f32, knpu.zero_point = 0 : i64})
+    -> (tensor<1x4x4x8xi8> {knpu.scale = 1.0 : f32, knpu.zero_point = 0 : i64}) {
+  %w = arith.constant dense<1> : tensor<8x1x1x8xi8>
+  %b = arith.constant dense<0> : tensor<8xi32>
+  %rq = arith.constant dense<1073741824> : tensor<8x2xi32>
+  %0 = knpu.conv2d %in, %w, %b, %rq {stride = array<i64: 1, 1>,
+      pad = array<i64: 0, 0, 0, 0>, input_zp = 0 : i64, output_zp = 0 : i64,
+      clamp = array<i64: -128, 127>, round = "double"}
+      : (tensor<1x4x4x8xi8>, tensor<8x1x1x8xi8>, tensor<8xi32>,
+         tensor<8x2xi32>) -> tensor<1x4x4x8xi8>
+  %e = tensor.empty() : tensor<1x4x4x8xi8>
+  %a0 = tensor.extract_slice %in[0, 0, 0, 0] [1, 2, 4, 8] [1, 1, 1, 1]
+      : tensor<1x4x4x8xi8> to tensor<1x2x4x8xi8>
+  %b0 = tensor.extract_slice %0[0, 0, 0, 0] [1, 2, 4, 8] [1, 1, 1, 1]
+      : tensor<1x4x4x8xi8> to tensor<1x2x4x8xi8>
+  %t0 = knpu.add %a0, %b0 {input_zp = 0 : i64, input2_zp = 0 : i64,
+      output_zp = 0 : i64, input_scale = array<i64: 1073741824, 0>,
+      input2_scale = array<i64: 1073741824, 0>,
+      output_scale = array<i64: 1073741824, -19>,
+      clamp = array<i64: -128, 127>, round = "double"}
+      : (tensor<1x2x4x8xi8>, tensor<1x2x4x8xi8>) -> tensor<1x2x4x8xi8>
+  %r0 = tensor.insert_slice %t0 into %e[0, 0, 0, 0] [1, 2, 4, 8] [1, 1, 1, 1]
+      : tensor<1x2x4x8xi8> into tensor<1x4x4x8xi8>
+  %a1 = tensor.extract_slice %in[0, 2, 0, 0] [1, 2, 4, 8] [1, 1, 1, 1]
+      : tensor<1x4x4x8xi8> to tensor<1x2x4x8xi8>
+  %b1 = tensor.extract_slice %0[0, 2, 0, 0] [1, 2, 4, 8] [1, 1, 1, 1]
+      : tensor<1x4x4x8xi8> to tensor<1x2x4x8xi8>
+  %t1 = knpu.add %a1, %b1 {input_zp = 0 : i64, input2_zp = 0 : i64,
+      output_zp = 0 : i64, input_scale = array<i64: 1073741824, 0>,
+      input2_scale = array<i64: 1073741824, 0>,
+      output_scale = array<i64: 1073741824, -19>,
+      clamp = array<i64: -128, 127>, round = "double"}
+      : (tensor<1x2x4x8xi8>, tensor<1x2x4x8xi8>) -> tensor<1x2x4x8xi8>
+  %r1 = tensor.insert_slice %t1 into %r0[0, 2, 0, 0] [1, 2, 4, 8] [1, 1, 1, 1]
+      : tensor<1x2x4x8xi8> into tensor<1x4x4x8xi8>
+  return %r1 : tensor<1x4x4x8xi8>
+}
+
+// CHECK-LABEL: module attributes {knpu.sram_size = 4096 : i64}
+// CHECK: knpu.region 1 "arena" size 384
+// CHECK-LABEL: func.func @knpu_model() {
+// CHECK: knpu.dma "store" region 1[128] sram[288] length 128
+// CHECK-NEXT: knpu.dma "load" region 1[0] sram[0] length 64
+// CHECK-NEXT: knpu.dma "load" region 1[128] sram[128] length 64
+// CHECK-NEXT: knpu.dma "load" region 1[64] sram[64] length 64
+// CHECK-NEXT: knpu.dma "load" region 1[192] sram[192] length 64
+// CHECK-NEXT: knpu.elementwise {{{.*}}ifm = 0 : i64, ifm2 = 128 : i64{{.*}}ofm = 256 : i64{{.*}}shape = array<i64: 2, 4, 8>}
+// CHECK-NEXT: knpu.dma "store" region 1[256] sram[256] length 64
+// CHECK-NEXT: knpu.elementwise {{{.*}}ifm = 64 : i64, ifm2 = 192 : i64{{.*}}ofm = 320 : i64{{.*}}shape = array<i64: 2, 4, 8>}
+// CHECK-NEXT: knpu.dma "store" region 1[320] sram[320] length 64
+// CHECK-NEXT: knpu.stop
+
+// SERIAL: knpu.io "output" region 1[256] shape [1, 4, 4, 8]
+// SERIAL: knpu.dma "store" region 1[128] sram[288] length 128
+// SERIAL-NEXT: knpu.dma "load" region 1[0] sram[0] length 64
+// SERIAL-NEXT: knpu.dma "load" region 1[128] sram[64] length 64
+// SERIAL-NEXT: knpu.elementwise {{{.*}}ifm = 0 : i64, ifm2 = 64 : i64{{.*}}ofm = 128 : i64
+// SERIAL-NEXT: knpu.dma "store" region 1[256] sram[128] length 64
+// SERIAL-NEXT: knpu.dma "load" region 1[64] sram[0] length 64
+// SERIAL-NEXT: knpu.dma "load" region 1[192] sram[64] length 64
+// SERIAL-NEXT: knpu.elementwise {{{.*}}ifm = 0 : i64, ifm2 = 64 : i64{{.*}}ofm = 128 : i64
+// SERIAL-NEXT: knpu.dma "store" region 1[320] sram[128] length 64
+
+// -----
+
+// An add needs its two inputs and its output in SRAM at once (3 x 2,048
+// bytes here), and knpu-tile does not split adds yet.
+
+func.func @knpu_model(
+    %in: tensor<1x32x32x2xi8> {knpu.scale = 1.0 : f32, knpu.zero_point = 0 : i64})
+    -> (tensor<1x32x32x2xi8> {knpu.scale = 1.0 : f32, knpu.zero_point = 0 : i64}) {
+  %w = arith.constant dense<1> : tensor<2x1x1x2xi8>
+  %b = arith.constant dense<0> : tensor<2xi32>
+  %rq = arith.constant dense<1073741824> : tensor<2x2xi32>
+  %0 = knpu.conv2d %in, %w, %b, %rq {stride = array<i64: 1, 1>,
+      pad = array<i64: 0, 0, 0, 0>, input_zp = 0 : i64, output_zp = 0 : i64,
+      clamp = array<i64: -128, 127>, round = "double"}
+      : (tensor<1x32x32x2xi8>, tensor<2x1x1x2xi8>, tensor<2xi32>,
+         tensor<2x2xi32>) -> tensor<1x32x32x2xi8>
+  // ERR: needs 6144 bytes of SRAM but 4096 are given (knpu-tile does not split an add yet)
+  %1 = knpu.add %in, %0 {input_zp = 0 : i64, input2_zp = 0 : i64,
+      output_zp = 0 : i64, input_scale = array<i64: 1073741824, 0>,
+      input2_scale = array<i64: 1073741824, 0>,
+      output_scale = array<i64: 1073741824, -19>,
+      clamp = array<i64: -128, 127>, round = "double"}
+      : (tensor<1x32x32x2xi8>, tensor<1x32x32x2xi8>) -> tensor<1x32x32x2xi8>
+  return %1 : tensor<1x32x32x2xi8>
+}
+
+// -----
+
+func.func @knpu_model(
+    %in: tensor<1x4x4x2xi8> {knpu.scale = 1.0 : f32, knpu.zero_point = 0 : i64})
+    -> (tensor<1x2x4x2xi8> {knpu.scale = 1.0 : f32, knpu.zero_point = 0 : i64}) {
+  %a = tensor.extract_slice %in[0, 0, 0, 0] [1, 2, 4, 2] [1, 1, 1, 1]
+      : tensor<1x4x4x2xi8> to tensor<1x2x4x2xi8>
+  %b = tensor.extract_slice %in[0, 2, 0, 0] [1, 2, 4, 2] [1, 1, 1, 1]
+      : tensor<1x4x4x2xi8> to tensor<1x2x4x2xi8>
+  // ERR: inputs must be read from the same row
+  %0 = knpu.add %a, %b {input_zp = 0 : i64, input2_zp = 0 : i64,
+      output_zp = 0 : i64, input_scale = array<i64: 1073741824, 0>,
+      input2_scale = array<i64: 1073741824, 0>,
+      output_scale = array<i64: 1073741824, -19>,
+      clamp = array<i64: -128, 127>, round = "double"}
+      : (tensor<1x2x4x2xi8>, tensor<1x2x4x2xi8>) -> tensor<1x2x4x2xi8>
+  return %0 : tensor<1x2x4x2xi8>
+}

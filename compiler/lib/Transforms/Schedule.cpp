@@ -5,11 +5,14 @@
 // (region 1), lays out SRAM by the lifetimes of its buffers and lowers the
 // graph to command operations (docs/design.md 9.4).
 //
-// The NPU layers run in program order as steps. With overlap (the default):
+// The NPU layers run in program order as steps. An add reads two tensors,
+// each from SRAM or loaded like the input of a convolution, and writes a
+// third: the NPU could add in place (docs/npu-spec.md 6.4), but the output
+// always gets a buffer of its own. With overlap (the default):
 // - An activation that whole (one-tile) layers read stays in SRAM from the
-//   layer that writes it to the last layer that reads it. Model inputs and
-//   outputs, tensors of cpu layers and tensors of tiled layers go through
-//   the arena.
+//   layer that writes it to the last layer that reads it, also when several
+//   layers read it (a residual connection). Model inputs and outputs,
+//   tensors of cpu layers and tensors of tiled layers go through the arena.
 // - Constants are double-buffered: the constants of a layer are loaded
 //   while the previous layer with constants runs, in front of that layer's
 //   first operation and after its own loads.
@@ -55,8 +58,9 @@ namespace {
 constexpr int64_t kConstRegion = 0;
 constexpr int64_t kArenaRegion = 1;
 
-/// One knpu.conv2d or knpu.avgpool: rows [srcRow, srcRow + inRows) of the
-/// layer's input in, rows [dstRow, dstRow + outRows) of its output out.
+/// One knpu.conv2d, knpu.avgpool or knpu.add: rows [srcRow, srcRow + inRows)
+/// of each of the layer's inputs in, rows [dstRow, dstRow + outRows) of its
+/// output out.
 struct Tile {
   Operation *op;
   int64_t srcRow, inRows;
@@ -65,12 +69,18 @@ struct Tile {
 
 /// The tiles writing one tensor: a step of the schedule.
 struct Layer {
-  Value src, dst; // tensors with reshapes looked through
+  // Inputs (two for an add) and output: tensors with reshapes looked through
+  SmallVector<Value, 2> srcs;
+  Value dst;
   Value weight, bias, rq; // convolutions only
   SmallVector<Tile> tiles;
   int64_t constOffset = 0; // in region 0
 
   bool conv() const { return static_cast<bool>(weight); }
+  bool reads(Value v) const { return llvm::is_contained(srcs, v); }
+  /// Input j is input 0 again (an add of a tensor to itself): it has no
+  /// buffer or load of its own
+  bool repeats(size_t j) const { return j > 0 && srcs[j] == srcs[0]; }
   Location loc() const { return tiles.front().op->getLoc(); }
 };
 
@@ -160,10 +170,12 @@ private:
   SmallVector<int> ahead, aheadFrom, keep, lastUse;
 
   // The buffers of the current plan; per step its constants (-1: none),
-  // input and output buffers (empty: the tensor stays in SRAM)
+  // the buffers of each input and the output buffers (empty: the tensor
+  // stays in SRAM)
   std::vector<Buffer> buffers;
   SmallVector<int> constBuf;
-  SmallVector<SmallVector<int, 2>> inBufs, outBufs;
+  SmallVector<std::array<SmallVector<int, 2>, 2>> inBufs;
+  SmallVector<SmallVector<int, 2>> outBufs;
   llvm::DenseMap<Value, int> keptBuf; // tensor kept in SRAM -> buffer
 };
 
@@ -191,26 +203,36 @@ LogicalResult SchedulePass::collect(func::FuncOp fn) {
       cpus.push_back(cpu);
       continue;
     }
-    if (!isa<Conv2DOp, AvgPool2DOp>(op))
+    if (!isa<Conv2DOp, AvgPool2DOp, AddOp>(op))
       return op.emitOpError("cannot be scheduled on the NPU");
     if (!cpus.empty())
       return op.emitOpError("cannot run on the NPU after a cpu layer");
 
-    Value input = op.getOperand(0), output = op.getResult(0);
-    Tile t{&op, 0, cast<ShapedType>(input.getType()).getDimSize(1), 0,
-           cast<ShapedType>(output.getType()).getDimSize(1)};
-    Value src = input;
-    if (auto slice = input.getDefiningOp<tensor::ExtractSliceOp>()) {
-      auto rows = rowSlice(slice, slice.getSourceType());
-      if (!rows)
-        return slice.emitOpError("must take whole rows of its source");
-      src = slice.getSource();
-      t.srcRow = rows->first;
+    Value output = op.getResult(0);
+    Tile t{&op, 0, cast<ShapedType>(op.getOperand(0).getType()).getDimSize(1),
+           0, cast<ShapedType>(output.getType()).getDimSize(1)};
+    // The inputs, of which a tile reads the same rows
+    SmallVector<Value, 2> srcs;
+    for (unsigned j = 0, e = isa<AddOp>(op) ? 2 : 1; j < e; ++j) {
+      Value src = op.getOperand(j);
+      int64_t row = 0;
+      if (auto slice = src.getDefiningOp<tensor::ExtractSliceOp>()) {
+        auto rows = rowSlice(slice, slice.getSourceType());
+        if (!rows)
+          return slice.emitOpError("must take whole rows of its source");
+        src = slice.getSource();
+        row = rows->first;
+      }
+      if (j == 0)
+        t.srcRow = row;
+      else if (row != t.srcRow)
+        return op.emitOpError("inputs must be read from the same row");
+      src = root(src);
+      if (!isTensor(src))
+        return op.emitOpError("input must be the model input or a whole "
+                              "layer output");
+      srcs.push_back(src);
     }
-    src = root(src);
-    if (!isTensor(src))
-      return op.emitOpError("input must be the model input or a whole "
-                            "layer output");
 
     // The written tensor: the result itself, or the end of the
     // tensor.insert_slice chain the result goes into
@@ -240,12 +262,12 @@ LogicalResult SchedulePass::collect(func::FuncOp fn) {
     }
     Layer &layer = byDst[dst];
     if (layer.tiles.empty()) {
-      layer.src = src;
+      layer.srcs = srcs;
       layer.dst = dst;
       layer.weight = weight;
       layer.bias = bias;
       layer.rq = rq;
-    } else if (layer.src != src || layer.weight != weight ||
+    } else if (layer.srcs != srcs || layer.weight != weight ||
                layer.bias != bias || layer.rq != rq ||
                layer.tiles.front().op->getName() != op.getName()) {
       return op.emitOpError("tiles of one output must share their input "
@@ -313,9 +335,10 @@ void SchedulePass::makeBuffers() {
       maxIn = std::max(maxIn, t.inRows * iw * ic);
       maxOut = std::max(maxOut, t.outRows * ow * oc);
     }
-    if (!keptBuf.count(l.src))
-      for (int c = 0; c < copies; ++c)
-        inBufs[i].push_back(add(maxIn, i, i, -1));
+    for (auto [j, src] : llvm::enumerate(l.srcs))
+      if (!keptBuf.count(src) && !l.repeats(j))
+        for (int c = 0; c < copies; ++c)
+          inBufs[i][j].push_back(add(maxIn, i, i, -1));
     if (keep[i] > 0) {
       keptBuf[l.dst] = add(bytesOf(l.dst), i, lastUse[i], 2 * i + 1);
     } else {
@@ -386,7 +409,7 @@ LogicalResult SchedulePass::planSram() {
             return root(c.getInput()) == l.dst;
           });
       for (size_t j = i + 1; j < n && !readElsewhere; ++j)
-        if (layers[j].src == l.dst) {
+        if (layers[j].reads(l.dst)) {
           readElsewhere = layers[j].tiles.size() > 1;
           lastUse[i] = j;
         }
@@ -442,12 +465,16 @@ void SchedulePass::runOnOperation() {
     }
     int64_t need = layerSramBytes(constBytes, maxIn, maxOut,
                                   doubleBuffered(l));
+    // The buffers of an add's second input
+    bool add = isa<AddOp>(l.tiles.front().op);
+    if (add && !l.repeats(1))
+      need += (doubleBuffered(l) ? 2 : 1) * alignTo16(maxIn);
     if (need > sramSize) {
       l.tiles.front().op->emitOpError()
           << "needs " << need << " bytes of SRAM but "
-          << static_cast<int64_t>(sramSize)
-          << " are given (run knpu-tile with the same sram-size and "
-             "overlap)";
+          << static_cast<int64_t>(sramSize) << " are given"
+          << (add ? " (knpu-tile does not split an add yet)"
+                  : " (run knpu-tile with the same sram-size and overlap)");
       return signalPassFailure();
     }
   }
@@ -520,30 +547,30 @@ void SchedulePass::runOnOperation() {
     auto [ih, iw, ic] = hwc(layer.tiles.front().op->getOperand(0));
     auto [oh, ow, oc] = hwc(layer.dst);
     bool db = doubleBuffered(layer);
-    auto keptIn = keptBuf.find(layer.src), keptOut = keptBuf.find(layer.dst);
-    bool inKept = keptIn != keptBuf.end(), outKept = keptOut != keptBuf.end();
-    int64_t srcBase = inKept ? 0 : arenaOffset[layer.src];
+    auto keptOut = keptBuf.find(layer.dst);
+    bool outKept = keptOut != keptBuf.end();
     int64_t dstBase = outKept ? 0 : arenaOffset[layer.dst];
 
     if (layer.conv() && ahead[i] <= 0)
       loadConstants(layer, i);
+    // The input DMAs of tile k: one per input that has buffers, that is,
+    // that is not in SRAM already
     auto load = [&](size_t k) {
       const Tile &t = layer.tiles[k];
-      dma(t.op->getLoc(), "load", kArenaRegion,
-          srcBase + t.srcRow * iw * ic,
-          buffers[inBufs[i][k % inBufs[i].size()]].offset,
-          t.inRows * iw * ic);
+      for (auto [j, src] : llvm::enumerate(layer.srcs))
+        if (const auto &bufs = inBufs[i][j]; !bufs.empty())
+          dma(t.op->getLoc(), "load", kArenaRegion,
+              arenaOffset[src] + t.srcRow * iw * ic,
+              buffers[bufs[k % bufs.size()]].offset, t.inRows * iw * ic);
     };
-    if (!inKept && db)
+    if (db)
       load(0);
     for (size_t k = 0; k < layer.tiles.size(); ++k) {
       const Tile &t = layer.tiles[k];
-      if (!inKept) {
-        if (!db)
-          load(k);
-        else if (k + 1 < layer.tiles.size())
-          load(k + 1);
-      }
+      if (!db)
+        load(k);
+      else if (k + 1 < layer.tiles.size())
+        load(k + 1);
       // In front of the layer's first operation: the constants of the next
       // layer with constants, loaded ahead
       if (k == 0)
@@ -551,9 +578,17 @@ void SchedulePass::runOnOperation() {
           if (ahead[j] > 0 && aheadFrom[j] == static_cast<int>(i))
             loadConstants(layers[j], j);
 
-      int64_t ifm = inKept ? buffers[keptIn->second].offset +
-                                 t.srcRow * iw * ic
-                           : buffers[inBufs[i][k % inBufs[i].size()]].offset;
+      // Where tile k finds input j
+      auto inAt = [&](size_t j) {
+        if (layer.repeats(j))
+          j = 0;
+        auto kept = keptBuf.find(layer.srcs[j]);
+        if (kept != keptBuf.end())
+          return buffers[kept->second].offset + t.srcRow * iw * ic;
+        const auto &bufs = inBufs[i][j];
+        return buffers[bufs[k % bufs.size()]].offset;
+      };
+      int64_t ifm = inAt(0);
       int64_t ofm = outKept ? buffers[keptOut->second].offset +
                                   t.dstRow * ow * oc
                             : buffers[outBufs[i][k % outBufs[i].size()]].offset;
@@ -572,14 +607,22 @@ void SchedulePass::runOnOperation() {
             b.getI64IntegerAttr(biasAt + alignTo16(4 * oc)),
             b.getDenseI64ArrayAttr({kh, kw}), conv.getStrideAttr(),
             conv.getPadAttr(), conv.getClampAttr(), conv.getRoundAttr());
-      } else {
-        auto pool = cast<AvgPool2DOp>(t.op);
+      } else if (auto pool = dyn_cast<AvgPool2DOp>(t.op)) {
         PoolOp::create(b, pool.getLoc(), b.getI64IntegerAttr(ifm),
                        b.getDenseI64ArrayAttr({t.inRows, iw, ic}),
                        b.getI64IntegerAttr(ofm),
                        b.getDenseI64ArrayAttr({t.outRows, ow, oc}),
                        pool.getKernelAttr(), pool.getStrideAttr(),
                        pool.getPadAttr(), pool.getClampAttr());
+      } else {
+        auto sum = cast<AddOp>(t.op);
+        ElementwiseOp::create(
+            b, sum.getLoc(), b.getI64IntegerAttr(ifm),
+            b.getI64IntegerAttr(inAt(1)), b.getI64IntegerAttr(ofm),
+            b.getDenseI64ArrayAttr({t.outRows, ow, oc}), sum.getInputZpAttr(),
+            sum.getInput2ZpAttr(), sum.getOutputZpAttr(),
+            sum.getInputScaleAttr(), sum.getInput2ScaleAttr(),
+            sum.getOutputScaleAttr(), sum.getClampAttr(), sum.getRoundAttr());
       }
       if (!outKept)
         dma(t.op->getLoc(), "store", kArenaRegion,

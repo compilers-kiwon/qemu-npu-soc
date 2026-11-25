@@ -59,10 +59,11 @@ def KnpuSchedule : Pass<"knpu-schedule", "::mlir::ModuleOp"> {
     tensors exchanged with cpu layers and the activations that do not stay
     in SRAM in the arena (region 1, docs/design.md D40), lays out SRAM by
     the lifetimes of its buffers and lowers every layer to command
-    operations. With `overlap` (the default) an activation that the next
-    layers read whole stays in SRAM, the constants of the next layer that
-    has constants are loaded while the current one runs, and the next
-    tile's input is loaded ahead of the current tile's operation.
+    operations; an add reads two tensors and writes a third, never in place.
+    With `overlap` (the default) an activation that the next layers read
+    whole stays in SRAM, the constants of the next layer that has constants
+    are loaded while the current one runs, and the next tile's input is
+    loaded ahead of the current tile's operation.
     `overlap=false` gives the serial schedule to compare with: every layer
     and tile goes to the arena and back, one buffer each. Adds the
     `knpu.region`, `knpu.io` and `knpu.cpu_step` operations and the
