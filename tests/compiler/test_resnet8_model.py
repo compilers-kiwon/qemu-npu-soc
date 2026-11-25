@@ -3,8 +3,8 @@
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 """V2 and V3 of the ResNet-8 of M3 (docs/plan.md M3.1 to M3.7).
 
-So far (M3.1 to M3.5) the model, its references, the generator and the
-compiled model for SRAM sizes of 128, 64 and 32 KiB:
+The model, its references, the generator, the compiled model for SRAM
+sizes of 128, 64 and 32 KiB and the test vectors of V6:
 
 1. models/resnet8/resnet8.tflite has the operators of docs/plan.md M3.1
    and the nominal MACs and parameters of docs/design.md 6.6.
@@ -38,6 +38,11 @@ compiled model for SRAM sizes of 128, 64 and 32 KiB:
    shared core in its main loop (docs/design.md D32).
 7. Compiled without wait commands (--insert-waits=false), each model stops
    with a synchronization error.
+8. With --vectors, the committed test vectors of V6
+   (models/resnet8/vectors/: the overlapped 64 KiB and 32 KiB models of
+   both rounding modes, the inputs other than the photographs, and the V2
+   outputs of all fifteen inputs in both rounding modes) must equal what
+   this run makes; --update-vectors writes them instead.
 
 Inputs: the ten photographs (models/resnet8/photos/, one per CIFAR-10
 class), three random inputs, all -128 and all 127. The random inputs come
@@ -56,7 +61,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import model_file  # noqa: E402
-from test_conv_model import ERR_SYNC, run_npu  # noqa: E402
+from test_conv_model import ERR_SYNC, check_vectors, run_npu  # noqa: E402
 from test_mnist_model import (CMD_PAYLOAD, OP_ADD, OP_AVGPOOL,  # noqa: E402
                               OP_CONV, OP_DMA, OP_STOP, SET_DMA_COUNT,
                               Checker, load_schema, read, run,
@@ -79,6 +84,9 @@ PARAMS = 203_746
 # output-channel tiles
 SRAM_SIZES = {131072: ("128k", 0, 0), 65536: ("64k", 2, 1),
               32768: ("32k", 7, 2)}
+# docs/plan.md M3.7: the SRAM sizes of the models in the test vectors; V6
+# runs them on a 64 KiB device
+VECTOR_SIZES = ("64k", "32k")
 
 
 def layers_2d(model, layers):
@@ -112,7 +120,12 @@ def main():
                 "knpu-compile", "knpu-run", "tflm-double", "tflm-single",
                 "cpu-run", "qemu", "qemu-ld-prefix", "work-dir"):
         ap.add_argument(f"--{opt}", required=True)
+    ap.add_argument("--vectors", help="directory of the V6 test vectors")
+    ap.add_argument("--update-vectors", action="store_true",
+                    help="write the test vectors instead of comparing")
     args = ap.parse_args()
+    if args.update_vectors and not args.vectors:
+        ap.error("--update-vectors needs --vectors")
     work = args.work_dir
     os.makedirs(work, exist_ok=True)
     c = Checker()
@@ -156,12 +169,16 @@ def main():
     print(f"random-2 is input {i} of the seeded stream")
     names += ["random-2", "all-min", "all-max"]
     inputs += [candidate, bytes([0x80]) * IN_BYTES, bytes([0x7F]) * IN_BYTES]
+    # The photographs are installed from models/resnet8/photos/ as they are
+    vectors = {f"{n}.bin": inp for n, inp in zip(names, inputs)
+               if not n.startswith("photo-")}
 
     # V2: final outputs and logits in both rounding modes
     golden = {}
     for mode in ("double", "single"):
         for n, inp in zip(names, inputs):
             golden[mode, n] = tflm(mode, n, inp)
+            vectors[f"expected-{mode}-{n}.bin"] = golden[mode, n][0]
             c.check(len(golden[mode, n][0]) == len(CLASSES),
                     f"{mode} {n}: TFLM output size")
             c.check(len(golden[mode, n][1]) == len(CLASSES),
@@ -234,7 +251,10 @@ def main():
                 # of the command stream
                 layers = [(m.group(1), int(m.group(2))) for m in re.finditer(
                     r"^  (\S+) +(?:conv|pool|add) +(\d+) ", text, re.M)]
-                model = model_file.read(read(knpu))
+                data = read(knpu)
+                if overlap and size_name in VECTOR_SIZES:
+                    vectors[f"resnet8-{mode}-{size_name}.knpu"] = data
+                model = model_file.read(data)
                 c.check(model.sram_size == sram, f"{tag}: header SRAM size")
                 chans, dmas = layers_2d(model, layers)
                 rows = [name for name, tiles in layers
@@ -305,6 +325,8 @@ def main():
                     f"{tag}: SYNC error without waits "
                     f"(err_code {result['err_code']:#x})")
 
+    if args.vectors:
+        check_vectors(c, args.vectors, vectors, args.update_vectors)
     print(f"{c.passes} passed, {c.failures} failed")
     sys.exit(1 if c.failures else 0)
 

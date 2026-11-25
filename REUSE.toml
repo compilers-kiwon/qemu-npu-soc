@@ -44,10 +44,11 @@ SPDX-FileCopyrightText = "2026 Kiwon Kwon"
 SPDX-License-Identifier = "Apache-2.0 WITH LLVM-exception"
 
 # The ResNet-8 that models/resnet8/make_model.py trains on CIFAR-10,
-# which states no license; its images are not in this repository
-# (docs/design.md 12.4)
+# which states no license; its images are not in this repository. The V6
+# test vectors made from it (tests/compiler/test_resnet8_model.py
+# --update-vectors) are declared like the model (docs/design.md 12.4).
 [[annotations]]
-path = "models/resnet8/resnet8.tflite"
+path = ["models/resnet8/resnet8.tflite", "models/resnet8/vectors/*"]
 SPDX-FileCopyrightText = "2026 Kiwon Kwon"
 SPDX-License-Identifier = "Apache-2.0 WITH LLVM-exception"
 

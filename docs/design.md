@@ -1038,9 +1038,9 @@ V3는 그것을 Ubuntu의 `gcc-aarch64-linux-gnu`, `libc6-dev-arm64-cross`,
 
 CPU 코드의 바이트는 apt.llvm.org LLVM 23 패키지(`mlir-23-tools`, `clang-23`,
 `lld-23`)의 판을 따른다(`ld.lld`는 판 번호를 `.comment`에 남긴다). push CI는
-실행 때마다 최신 23.x를 받는다. 판이 오르면 새로 컴파일한 MNIST 모델이
-커밋한 벡터(10절)와 달라 V3가 실패하므로, 로컬 도구를 같은 판으로 올리고
-`make update-vectors`로 벡터를 다시 만들어 커밋한다.
+실행 때마다 최신 23.x를 받는다. 판이 오르면 새로 컴파일한 MNIST CNN과
+ResNet-8 모델이 커밋한 벡터(10절)와 달라 V3가 실패하므로, 로컬 도구를 같은
+판으로 올리고 `make update-vectors`로 벡터를 다시 만들어 커밋한다.
 
 ### 12.3 연결 패치
 

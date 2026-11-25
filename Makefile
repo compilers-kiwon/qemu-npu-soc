@@ -93,11 +93,11 @@ compiler: $(PY_STAMP)
 check-compiler: compiler
 	ctest --test-dir '$(BUILD_DIR)/compiler' --output-on-failure
 
-# Writes models/conv/vectors/ and models/mnist/vectors/ again; commit them
-# when they change
+# Writes models/conv/vectors/, models/mnist/vectors/ and
+# models/resnet8/vectors/ again; commit them when they change
 update-vectors: compiler
 	cmake --build '$(BUILD_DIR)/compiler' --target update-conv-vectors \
-	      update-mnist-vectors
+	      update-mnist-vectors update-resnet8-vectors
 
 # Rust 1.97.1: the cargo of the full build if there is one, else the
 # system's
