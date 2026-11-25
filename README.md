@@ -14,7 +14,7 @@ MLIR로 컴파일해 이 NPU에서 돌리고, 결과를 TFLite Micro 참조 구�
 
 ## 구성
 
-설계 12.1절의 구성이다. 아직 없는 디렉터리는 해당 단계에서 생긴다.
+설계 12.1절의 구성이다.
 
 | 경로 | 내용 |
 |------|------|
@@ -243,8 +243,9 @@ CI와 컴파일러에는 TensorFlow가 필요 없다.
 `knpu-infer`는 모델 하나를 입력 하나로 돌려 성능 카운터를 찍고, 기대값과
 비교한다. 외부 크레이트는 쓰지 않는다. Buildroot가 `knpu-infer`를 `/usr/bin`에,
 시험 모델과 입력, 정답값을 `/usr/share/knpu/conv/`(합성곱,
-`models/conv/vectors/`)와 `/usr/share/knpu/mnist/`(MNIST CNN,
-`models/mnist/vectors/`와 숫자 이미지)에 넣는다.
+`models/conv/vectors/`), `/usr/share/knpu/mnist/`(MNIST CNN,
+`models/mnist/vectors/`와 숫자 이미지), `/usr/share/knpu/resnet8/`(ResNet-8,
+`models/resnet8/vectors/`와 사진)에 넣는다.
 
 부팅한 kn1-evb에서 4 KiB SRAM용으로 컴파일한 모델(타일 5개)을 돌리면 다음과
 같다.
@@ -269,20 +270,21 @@ make check-runtime
 ```
 
 V6은 펌웨어 체인으로 부팅한 게스트에서 합성곱 모델 넷(반올림 double·single ×
-SRAM 64 KiB·4 KiB)을 입력 다섯으로, MNIST CNN 모델 넷(SRAM 64 KiB·32 KiB)을
-입력 열다섯으로 돌려 TensorFlow Lite Micro의 출력과 비교하고, `top1`, 카운터,
-잘린 모델의 거부를 확인한다. MNIST의 기대값은 저장소의 벡터에서 계산하므로,
-먼저 이미지에 든 파일이 저장소의 것과 같은지 본다.
+SRAM 64 KiB·4 KiB)을 입력 다섯으로, MNIST CNN과 ResNet-8의 모델 넷씩(SRAM
+64 KiB·32 KiB)을 입력 열다섯으로 돌려 TensorFlow Lite Micro의 출력과 비교하고,
+`top1`, 카운터, 잘린 모델의 거부를 확인한다. MNIST CNN과 ResNet-8의 기대값은
+저장소의 벡터에서 계산하므로, 먼저 이미지에 든 파일이 저장소의 것과 같은지
+본다.
 
 ```bash
 make test-v6
 ```
 
 컴파일러 출력이 바뀌면 시험 벡터(`models/*/vectors/`)를 다시 만들어 커밋한다.
-커밋본이 다르면 V3(`ctest`)가 실패한다. MNIST 모델의 CPU 코드는 LLVM 23 도구의
-판에 따라 바이트가 달라지므로(`ld.lld`가 판 번호를 남긴다), apt.llvm.org의
-판이 오를 때도 다시 만든다(설계 12.2절). 새 벡터를 이미지에 넣으려면
-`knpu-models` 패키지와 이미지를 다시 만든다.
+커밋본이 다르면 V3(`ctest`)가 실패한다. MNIST CNN과 ResNet-8 모델의 CPU 코드는
+LLVM 23 도구의 판에 따라 바이트가 달라지므로(`ld.lld`가 판 번호를 남긴다),
+apt.llvm.org의 판이 오를 때도 다시 만든다(설계 12.2절). 새 벡터를 이미지에
+넣으려면 `knpu-models` 패키지와 이미지를 다시 만든다.
 
 ```bash
 make update-vectors
@@ -375,6 +377,44 @@ TensorFlow 2.21.0으로 CIFAR-10에서 학습해 int8로 바꾼다. 그 결과�
 CIFAR-10 시험 집합 10,000장의 정확도는 float 모델이 88.02%, int8 모델이
 87.63%다.
 
+- NPU: 공유 코어에 덧셈(`OP_ADD`)을 더했다. 잔차 연결의 덧셈은 두 입력을 같은
+  스케일로 맞춰 더한 뒤 출력의 스케일로 바꾼다(명세 8.3절). 생성기와
+  컴파일러는 한 층의 출력을 두 층이 읽는 그래프를 다루고, 덧셈 층은 입력을 둘
+  읽는다.
+- 타일링: SRAM에 들어가지 않는 층은 출력 행 타일이나 출력 채널 타일로 나눈다.
+  출력 채널 타일은 출력의 채널 일부를 2-D DMA로 arena에 쓴다(명세 6.3절). SRAM
+  크기마다 층을 나눈 방법은 아래 절에 있다.
+- CPU: softmax는 MNIST CNN처럼 모델 파일에 든 aarch64 코드로 돈다.
+- 검증: 두 반올림 방식 모두 시험 입력 열다섯(사진 열 장, 무작위 셋, 전부 -128,
+  전부 127)의 출력이 TFLite Micro와 비트 단위로 같다. 생성기의 C를 gcc로
+  돌리고(V2), SRAM 128, 64, 32 KiB로 컴파일한 모델의 NPU 부분을 공유 코어에서,
+  CPU 부분을 qemu-aarch64에서 돌리고(V3), 64 KiB와 32 KiB 모델을 kn1-evb(SRAM
+  64 KiB)에서 `knpu-infer`로 돌린다(V6).
+
+`models/resnet8/photos/`의 사진 열 장은 CIFAR-10 클래스마다 Wikimedia
+Commons에서 한 장씩 고른 CC0-1.0 사진을 32x32로 줄인 것이다. 출처와 저작자는
+`make_photos.py`와 `REUSE.toml`에 있다. 사진은 모델의 분류 결과를 보기 전에
+골랐고, 틀리게 분류된 사진도 그대로 둔다. 비행기, 자동차, 새, 고양이, 개, 배,
+트럭 사진은 제 클래스로 분류되고, 사슴 사진은 새로, 개구리 사진은 고양이로, 말
+사진은 사슴으로 분류된다. 분류 결과는 두 반올림 방식에서 같다.
+
+부팅한 kn1-evb에서 64 KiB SRAM용으로 컴파일한 모델에 배 사진을 넣으면 다음과
+같다. `top1=8`은 CIFAR-10의 클래스 순서에서 배(ship)다. MNIST CNN과 달리
+활성값 일부가 arena를 거치므로 `dma_wr_bytes`가 logits 10바이트보다
+크다(아래 절).
+
+```
+# modprobe knpu
+# cd /usr/share/knpu/resnet8
+# knpu-infer resnet8-double-64k.knpu photo-ship.bin --expect expected-double-photo-ship.bin
+model=resnet8-double-64k.knpu format=0.1 sram_size=65536 command_bytes=2700 model_ops=74 cpu_steps=3
+input_shape=1x32x32x3 input_scale=1.0 input_zero_point=-128 output_shape=1x1x1x10 output_scale=0.00390625 output_zero_point=-128
+device=/dev/accel/accel0 npu=0.0 device_sram_size=65536
+macs=32562192 dma_rd_bytes=361936 dma_wr_bytes=106506 ops=74
+top1=8
+match=yes
+```
+
 ### SRAM 크기와 사이클 추정
 
 같은 모델을 SRAM 128, 64, 32 KiB로, 겹침을 켜고(기본) 끄고(`--overlap=false`)
@@ -458,7 +498,7 @@ NPU 공유 코어 시험(V2, V3), 모델 컴파일러 시험(V2~V4), 런타임 �
 |----------|------|------|
 | M1 | 합성곱 하나를 모든 층에 관통시킨다 | 끝났다. M1.1 저장소 뼈대, M1.2 펌웨어 체인 부팅(QEMU 머신, 디바이스 트리, TF-A, U-Boot, 리눅스 셸), M1.3 NPU 명세 v0([docs/npu-spec.md](docs/npu-spec.md)), M1.4 NPU 공유 코어와 정답값 비교(V2, V3), M1.5 QEMU NPU 장치(V1), M1.6 `knpu` 드라이버(V5), M1.7 모델 컴파일러 최소 경로(V2~V4), M1.8 런타임과 끝-끝 시험(V6) |
 | M2 | MNIST CNN | 끝났다. M2.1 MNIST 모델과 정답값(V2), M2.2 공유 코어의 `OP_AVGPOOL`(V1~V3), M2.3 생성기의 새 연산과 softmax(V2), M2.4 컴파일러 NPU 경로와 사이클 추정(V3, V4), M2.5 컴파일러 CPU 경로와 lcc-opt(V3, V4), M2.6 런타임의 CPU 단계와 top-1, M2.7 커널 설정 `kn1_defconfig`, M2.8 끝-끝 시험(V6)과 사이클 추정 보고 |
-| M3 | MLPerf Tiny ResNet-8 | 진행 중. 끝난 단계: M3.1 ResNet-8 모델과 정답값(V2), M3.2 공유 코어의 `OP_ADD`(V1~V3), M3.3 생성기의 ADD와 잔차 연결(V2), M3.4 컴파일러의 ADD와 두 입력 층(V3, V4), M3.5 컴파일러의 출력 채널 타일과 2-D DMA(V3, V4), M3.6 SRAM 배치 개선과 SRAM 크기 시연(V3, V4). 남은 단계: M3.7 끝-끝 시험(V6) |
+| M3 | MLPerf Tiny ResNet-8 | 끝났다. M3.1 ResNet-8 모델과 정답값(V2), M3.2 공유 코어의 `OP_ADD`(V1~V3), M3.3 생성기의 ADD와 잔차 연결(V2), M3.4 컴파일러의 ADD와 두 입력 층(V3, V4), M3.5 컴파일러의 출력 채널 타일과 2-D DMA(V3, V4), M3.6 SRAM 배치 개선과 SRAM 크기 시연(V3, V4), M3.7 끝-끝 시험(V6) |
 | M4 | 마무리: 새로 받은 저장소에서 README만으로 빌드와 데모 | 시작 전 |
 
 ## 라이선스
