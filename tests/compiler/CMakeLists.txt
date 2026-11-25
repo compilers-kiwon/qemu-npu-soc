@@ -13,8 +13,9 @@
 #       CPU steps on cpu_run under qemu-aarch64
 #   V3  test_resnet8_model.py: the ResNet-8 of M3 (so far its V2 outputs
 #       and logits from TFLite Micro and from the tflite2c C on gcc, and
-#       for a 128 KiB SRAM the whole model through lcc -> knpu-compile ->
-#       knpu_run and cpu_run under qemu-aarch64, docs/plan.md M3.1 to M3.4)
+#       for SRAM sizes of 128, 64 and 32 KiB the whole model through lcc ->
+#       knpu-compile -> knpu_run and cpu_run under qemu-aarch64,
+#       docs/plan.md M3.1 to M3.5)
 #   V2  test_softmax.py: the tflite2c softmax on gcc against TFLite Micro,
 #       over input scales, betas and row lengths
 
