@@ -13,6 +13,19 @@
 
 namespace mlir::knpu {
 
+/// How knpu-schedule gives up its SRAM choices where SRAM is short
+/// (docs/design.md 9.4)
+enum class Placement {
+  /// The choice that then moves the fewest bytes goes first, an activation
+  /// may stay until the first layer that reads it as a middle level, and
+  /// demotions the layout turns out not to need are undone (the default)
+  Cost,
+  /// The rule before M3.6: the largest choice goes first, an activation
+  /// stays until the last layer that reads it or not at all, and nothing is
+  /// undone
+  Largest,
+};
+
 #define GEN_PASS_DECL
 #include "knpu/Transforms/Passes.h.inc"
 

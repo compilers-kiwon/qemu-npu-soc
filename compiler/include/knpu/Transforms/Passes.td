@@ -73,20 +73,31 @@ def KnpuSchedule : Pass<"knpu-schedule", "::mlir::ModuleOp"> {
     constants are loaded while the current one runs, and the next tile's
     input is loaded ahead of the current tile's operation. Where SRAM is
     short these choices are given up one level at a time, first those that
-    then move the fewest bytes without overlap. Output-channel tiles of
-    the same output rows read their input once, load the next tile's
-    constants ahead and write their outputs to the arena with 2-D DMAs.
-    `overlap=false` gives the serial schedule to compare with: every layer
-    and tile goes to the arena and back, one buffer each. Adds the
-    `knpu.region`, `knpu.io` and `knpu.cpu_step` operations and the
-    `knpu.sram_size` module attribute. No wait commands are inserted
-    (knpu-insert-waits).
+    then move the fewest bytes without overlap. `placement=largest` gives
+    the rule before that instead, which knpu-compile compares with: an
+    activation stays until the last layer that reads it or goes through the
+    arena, and the largest choice is given up first, for good.
+    Output-channel tiles of the same output rows read their input once,
+    load the next tile's constants ahead and write their outputs to the
+    arena with 2-D DMAs. `overlap=false` gives the serial schedule to
+    compare with: every layer and tile goes to the arena and back, one
+    buffer each. Adds the `knpu.region`, `knpu.io` and `knpu.cpu_step`
+    operations and the `knpu.sram_size` module attribute. No wait commands
+    are inserted (knpu-insert-waits).
   }];
   let options = [
     Option<"sramSize", "sram-size", "int64_t", "65536",
            "SRAM size of the target NPU in bytes">,
     Option<"overlap", "overlap", "bool", "true",
            "Keep activations in SRAM and load ahead (false: serial)">,
+    Option<"placement", "placement", "::mlir::knpu::Placement",
+           "::mlir::knpu::Placement::Cost",
+           "Which choice to give up first where SRAM is short",
+           [{::llvm::cl::values(
+             clEnumValN(::mlir::knpu::Placement::Cost, "cost",
+                        "the one that then moves the fewest bytes"),
+             clEnumValN(::mlir::knpu::Placement::Largest, "largest",
+                        "the largest (the rule before M3.6)"))}]>,
   ];
 }
 

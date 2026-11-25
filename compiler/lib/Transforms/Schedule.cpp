@@ -50,6 +50,13 @@
 // bytes without overlap; if there is none, the largest. Once the layout
 // fits, the demotions it turns out not to need are undone, the costliest
 // first. Wait commands are left to knpu-insert-waits.
+//
+// placement=largest gives the rule before M3.6 instead, which knpu-compile
+// compares with: an activation is kept only until the last layer that
+// reads it, so only if whole layers read it; the buffers of single steps
+// are placed only in the order they were made; the largest choice alive
+// with the buffer that failed is demoted, a kept activation straight to the
+// arena; and nothing is undone.
 
 #include "knpu/Transforms/Passes.h"
 
@@ -466,7 +473,7 @@ void SchedulePass::makeBuffers() {
 /// Places the buffers; returns the index of one that does not fit, or -1.
 /// Buffers of several steps go first, largest first, then those of single
 /// steps in the order they were made; if that does not fit, the single
-/// steps' largest first too.
+/// steps' largest first too (not with placement=largest).
 int SchedulePass::placeBuffers() {
   auto attempt = [&](bool bigFirst) {
     SmallVector<int> order(buffers.size());
@@ -500,7 +507,7 @@ int SchedulePass::placeBuffers() {
     return -1;
   };
   int failed = attempt(false);
-  if (failed >= 0 && attempt(true) < 0)
+  if (failed >= 0 && placement == Placement::Cost && attempt(true) < 0)
     return -1;
   return failed;
 }
@@ -544,6 +551,7 @@ std::pair<int64_t, bool> SchedulePass::demotion(int choice, int64_t first,
 }
 
 LogicalResult SchedulePass::planSram() {
+  bool byCost = placement == Placement::Cost;
   size_t n = layers.size();
   ahead.assign(n, -1);
   aheadFrom.assign(n, -1);
@@ -564,7 +572,7 @@ LogicalResult SchedulePass::planSram() {
     }
     // Outputs of whole layers that are not model outputs and that a whole
     // layer reads first: kept until the last layer that reads them if only
-    // whole layers do, else until the first
+    // whole layers do, else until the first (not with placement=largest)
     for (size_t i = 0; i < n; ++i) {
       const Layer &l = layers[i];
       if (l.tiles.size() > 1 ||
@@ -581,7 +589,8 @@ LogicalResult SchedulePass::planSram() {
           lastUse[i] = j;
           whole = whole && layers[j].tiles.size() == 1;
         }
-      if (firstUse[i] >= 0 && layers[firstUse[i]].tiles.size() == 1)
+      if (firstUse[i] >= 0 && layers[firstUse[i]].tiles.size() == 1 &&
+          (whole || byCost))
         keep[i] = whole ? 2 : 1;
     }
   }
@@ -590,8 +599,9 @@ LogicalResult SchedulePass::planSram() {
     int i = choice / 2;
     if (choice % 2 == 0)
       --ahead[i];
-    // With one layer reading it, kept until the first is kept until the last
-    else if (--keep[i] == 1 && firstUse[i] == lastUse[i])
+    // With one layer reading it, kept until the first is kept until the
+    // last; placement=largest has no level between kept and the arena
+    else if (--keep[i] == 1 && (firstUse[i] == lastUse[i] || !byCost))
       keep[i] = 0;
   };
   auto promote = [&](int choice) {
@@ -610,8 +620,9 @@ LogicalResult SchedulePass::planSram() {
       break;
     // Demote one level, of the choices alive with the buffer that did not
     // fit and whose demotion frees SRAM during its steps, the one that moves
-    // the fewest bytes without overlap; if there is none, the largest (its
-    // buffers may then be placed elsewhere)
+    // the fewest bytes without overlap; if there is none, or with
+    // placement=largest, the largest (its buffers may then be placed
+    // elsewhere)
     const Buffer &f = buffers[failed];
     int best = -1, largest = -1;
     int64_t bestCost = 0;
@@ -620,6 +631,8 @@ LogicalResult SchedulePass::planSram() {
         continue;
       if (largest < 0 || buf.size > buffers[largest].size)
         largest = k;
+      if (!byCost)
+        continue;
       auto [cost, frees] = demotion(buf.choice, f.first, f.last);
       if (frees && (best < 0 || cost < bestCost ||
                     (cost == bestCost && buf.size > buffers[best].size))) {
@@ -634,9 +647,13 @@ LogicalResult SchedulePass::planSram() {
              << "buffers do not fit in " << static_cast<int64_t>(sramSize)
              << " bytes of SRAM";
     int choice = buffers[best].choice;
-    demoted.push_back({choice, demotion(choice, 0, -1).first});
+    if (byCost)
+      demoted.push_back({choice, demotion(choice, 0, -1).first});
     demote(choice);
   }
+  // placement=largest keeps the layout it found
+  if (!byCost)
+    return success();
   // Promote back, the costliest first, the demotions that the layout turns
   // out not to need (a later demotion may have freed the SRAM they did)
   llvm::stable_sort(demoted, [](const auto &a, const auto &b) {

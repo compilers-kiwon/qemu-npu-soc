@@ -3,6 +3,7 @@
 // RUN: not knpu-opt %s -split-input-file --knpu-tile=sram-size=4096 --knpu-schedule=sram-size=4096 2> %t.err | FileCheck %s
 // RUN: FileCheck %s --check-prefix=ERR < %t.err
 // RUN: not knpu-opt %s -split-input-file --knpu-tile="sram-size=4096 overlap=false" --knpu-schedule="sram-size=4096 overlap=false" 2>/dev/null | FileCheck %s --check-prefix=SERIAL
+// RUN: not knpu-opt %s -split-input-file --knpu-tile=sram-size=4096 --knpu-schedule="sram-size=4096 placement=largest" 2>/dev/null | FileCheck %s --check-prefix=LARGEST
 
 // One layer, one tile: the shapes of docs/npu-spec.md 12. Region 0 holds
 // weights (36 bytes, padded to 48), bias and the requantization table; the
@@ -628,7 +629,9 @@ func.func @knpu_model(
 // the first conv's output stays in SRAM (at 0) until the second conv, which
 // reads it there while it is stored to the arena (at 1536), and the add,
 // split into row tiles (its inputs and output do not fit in 4 KiB at once),
-// loads its rows from the arena.
+// loads its rows from the arena. With placement=largest (the rule before
+// M3.6) the output is not kept: it goes to the arena and the second conv
+// loads it back.
 
 func.func @knpu_model(
     %in: tensor<1x32x24x2xi8> {knpu.scale = 1.0 : f32, knpu.zero_point = 0 : i64})
@@ -668,6 +671,20 @@ func.func @knpu_model(
 // CHECK-NEXT: knpu.dma "load" region 1[1536] sram[0] length 672
 // CHECK-NEXT: knpu.dma "load" region 1[3072] sram[1344] length 672
 
+// LARGEST: knpu.io "input" region 1[0] shape [1, 32, 24, 2]
+// LARGEST-NEXT: knpu.io "output" region 1[4608] shape [1, 32, 24, 2]
+// LARGEST-NEXT: func.func @knpu_model() {
+// LARGEST-NEXT: knpu.dma "load" region 0[0] sram[48] length 48
+// LARGEST-NEXT: knpu.dma "load" region 1[0] sram[96] length 1536
+// LARGEST-NEXT: knpu.dma "load" region 0[48] sram[0] length 48
+// LARGEST-NEXT: knpu.conv {{{.*}}ifm = 96 : i64{{.*}}ofm = 1632 : i64{{.*}}weight = 48 : i64}
+// LARGEST-NEXT: knpu.dma "store" region 1[1536] sram[1632] length 1536
+// LARGEST-NEXT: knpu.dma "load" region 1[1536] sram[48] length 1536
+// LARGEST-NEXT: knpu.conv {{{.*}}ifm = 48 : i64{{.*}}ofm = 1584 : i64{{.*}}weight = 0 : i64}
+// LARGEST-NEXT: knpu.dma "store" region 1[3072] sram[1584] length 1536
+// LARGEST-NEXT: knpu.dma "load" region 1[1536] sram[0] length 672
+// LARGEST-NEXT: knpu.dma "load" region 1[3072] sram[1344] length 672
+
 // -----
 
 // Three convs whose 1,536-byte outputs, kept in SRAM, leave room in 4 KiB
@@ -675,7 +692,9 @@ func.func @knpu_model(
 // that load moves fewer bytes without overlap than sending an output
 // through the arena and back, so the outputs stay in SRAM (the arena holds
 // only the model input and output); the second conv's constants are loaded
-// while the first runs, the third's after the second.
+// while the first runs, the third's after the second. The rule before M3.6
+// gives up the largest choices, the kept outputs, first: every output goes
+// through the arena, and each conv loads its constants itself.
 
 func.func @knpu_model(
     %in: tensor<1x8x8x1xi8> {knpu.scale = 1.0 : f32, knpu.zero_point = 0 : i64})
@@ -715,12 +734,32 @@ func.func @knpu_model(
 // CHECK-NEXT: knpu.dma "store" region 1[64] sram[0] length 1536
 // CHECK-NEXT: knpu.stop
 
+// LARGEST: knpu.region 1 "arena" size 4672
+// LARGEST-NEXT: knpu.io "input" region 1[0] shape [1, 8, 8, 1]
+// LARGEST-NEXT: knpu.io "output" region 1[3136] shape [1, 8, 8, 24]
+// LARGEST-NEXT: func.func @knpu_model() {
+// LARGEST-NEXT: knpu.dma "load" region 0[0] sram[0] length 320
+// LARGEST-NEXT: knpu.dma "load" region 1[0] sram[320] length 64
+// LARGEST-NEXT: knpu.conv {{{.*}}ifm = 320 : i64{{.*}}ofm = 384 : i64{{.*}}weight = 0 : i64}
+// LARGEST-NEXT: knpu.dma "store" region 1[64] sram[384] length 1536
+// LARGEST-NEXT: knpu.dma "load" region 0[320] sram[0] length 864
+// LARGEST-NEXT: knpu.dma "load" region 1[64] sram[864] length 1536
+// LARGEST-NEXT: knpu.conv {{{.*}}ifm = 864 : i64{{.*}}ofm = 2400 : i64{{.*}}weight = 0 : i64}
+// LARGEST-NEXT: knpu.dma "store" region 1[1600] sram[2400] length 1536
+// LARGEST-NEXT: knpu.dma "load" region 0[1184] sram[0] length 864
+// LARGEST-NEXT: knpu.dma "load" region 1[1600] sram[864] length 1536
+// LARGEST-NEXT: knpu.conv {{{.*}}ifm = 864 : i64{{.*}}ofm = 2400 : i64{{.*}}weight = 0 : i64}
+// LARGEST-NEXT: knpu.dma "store" region 1[3136] sram[2400] length 1536
+// LARGEST-NEXT: knpu.stop
+
 // -----
 
 // The same with 768-byte outputs and 1,408-byte constants (M3.6): again
 // only one later layer's constants can be loaded ahead. Making the layout
 // fit drops both loads ahead, one after the other; the second conv's is
-// then restored, as dropping the third's alone leaves room for it.
+// then restored, as dropping the third's alone leaves room for it. The
+// rule before M3.6 does not restore it: both convs load their constants
+// themselves.
 
 func.func @knpu_model(
     %in: tensor<1x4x6x1xi8> {knpu.scale = 1.0 : f32, knpu.zero_point = 0 : i64})
@@ -760,12 +799,29 @@ func.func @knpu_model(
 // CHECK-NEXT: knpu.dma "store" region 1[32] sram[1408] length 768
 // CHECK-NEXT: knpu.stop
 
+// LARGEST: knpu.region 1 "arena" size 800
+// LARGEST-NEXT: knpu.io "input" region 1[0] shape [1, 4, 6, 1]
+// LARGEST-NEXT: knpu.io "output" region 1[32] shape [1, 4, 6, 32]
+// LARGEST-NEXT: func.func @knpu_model() {
+// LARGEST-NEXT: knpu.dma "load" region 0[0] sram[768] length 416
+// LARGEST-NEXT: knpu.dma "load" region 1[0] sram[1184] length 24
+// LARGEST-NEXT: knpu.conv {{{.*}}ifm = 1184 : i64{{.*}}ofm = 0 : i64{{.*}}weight = 768 : i64}
+// LARGEST-NEXT: knpu.dma "load" region 0[416] sram[1536] length 1408
+// LARGEST-NEXT: knpu.conv {{{.*}}ifm = 0 : i64{{.*}}ofm = 768 : i64{{.*}}weight = 1536 : i64}
+// LARGEST-NEXT: knpu.dma "load" region 0[1824] sram[1536] length 1408
+// LARGEST-NEXT: knpu.conv {{{.*}}ifm = 768 : i64{{.*}}ofm = 0 : i64{{.*}}weight = 1536 : i64}
+// LARGEST-NEXT: knpu.dma "store" region 1[32] sram[0] length 768
+// LARGEST-NEXT: knpu.stop
+
 // -----
 
 // Four convs, 1 -> 24 -> 32 -> 24 -> 32 channels (M3.6). Placed in the
 // order they were made, the buffers of single steps do not fit with every
 // output kept in SRAM, and the third conv's output would go through the
 // arena; placed largest first, they fit, and every output stays in SRAM.
+// The rule before M3.6 places them only in the order they were made and
+// gives up the largest choices first: every output goes through the
+// arena.
 
 func.func @knpu_model(
     %in: tensor<1x6x8x1xi8> {knpu.scale = 1.0 : f32, knpu.zero_point = 0 : i64})
@@ -814,3 +870,102 @@ func.func @knpu_model(
 // CHECK-NEXT: knpu.conv {{{.*}}ifm = 1536 : i64{{.*}}ofm = 0 : i64{{.*}}weight = 2688 : i64}
 // CHECK-NEXT: knpu.dma "store" region 1[48] sram[0] length 1536
 // CHECK-NEXT: knpu.stop
+
+// LARGEST: knpu.region 1 "arena" size 5424
+// LARGEST-NEXT: knpu.io "input" region 1[0] shape [1, 6, 8, 1]
+// LARGEST-NEXT: knpu.io "output" region 1[3888] shape [1, 6, 8, 32]
+// LARGEST-NEXT: func.func @knpu_model() {
+// LARGEST-NEXT: knpu.dma "load" region 0[0] sram[0] length 320
+// LARGEST-NEXT: knpu.dma "load" region 1[0] sram[320] length 48
+// LARGEST-NEXT: knpu.conv {{{.*}}ifm = 320 : i64{{.*}}ofm = 368 : i64{{.*}}weight = 0 : i64}
+// LARGEST-NEXT: knpu.dma "store" region 1[48] sram[368] length 1152
+// LARGEST-NEXT: knpu.dma "load" region 0[320] sram[0] length 1152
+// LARGEST-NEXT: knpu.dma "load" region 1[48] sram[1152] length 1152
+// LARGEST-NEXT: knpu.conv {{{.*}}ifm = 1152 : i64{{.*}}ofm = 2304 : i64{{.*}}weight = 0 : i64}
+// LARGEST-NEXT: knpu.dma "store" region 1[1200] sram[2304] length 1536
+// LARGEST-NEXT: knpu.dma "load" region 0[1472] sram[0] length 1056
+// LARGEST-NEXT: knpu.dma "load" region 1[1200] sram[1056] length 1536
+// LARGEST-NEXT: knpu.conv {{{.*}}ifm = 1056 : i64{{.*}}ofm = 2592 : i64{{.*}}weight = 0 : i64}
+// LARGEST-NEXT: knpu.dma "store" region 1[2736] sram[2592] length 1152
+// LARGEST-NEXT: knpu.dma "load" region 0[2528] sram[0] length 1152
+// LARGEST-NEXT: knpu.dma "load" region 1[2736] sram[1152] length 1152
+// LARGEST-NEXT: knpu.conv {{{.*}}ifm = 1152 : i64{{.*}}ofm = 2304 : i64{{.*}}weight = 0 : i64}
+// LARGEST-NEXT: knpu.dma "store" region 1[3888] sram[2304] length 1536
+// LARGEST-NEXT: knpu.stop
+
+// -----
+
+// Four convs, 1 -> 32 -> 16 -> 32 -> 16 channels (M4.1). The current rule
+// keeps every output in SRAM and loads every conv's constants ahead. The
+// rule before M3.6 gives up the largest choices first and places the
+// buffers of single steps only in the order they were made: the first two
+// convs' outputs go through the arena (placed largest first, the second's
+// would stay in SRAM), and only the last conv's constants are loaded ahead.
+
+func.func @knpu_model(
+    %in: tensor<1x6x8x1xi8> {knpu.scale = 1.0 : f32, knpu.zero_point = 0 : i64})
+    -> (tensor<1x6x8x16xi8> {knpu.scale = 1.0 : f32, knpu.zero_point = 0 : i64}) {
+  %w1 = arith.constant dense<1> : tensor<32x1x1x1xi8>
+  %w2 = arith.constant dense<1> : tensor<16x1x1x32xi8>
+  %w3 = arith.constant dense<1> : tensor<32x1x1x16xi8>
+  %b32 = arith.constant dense<0> : tensor<32xi32>
+  %rq32 = arith.constant dense<1073741824> : tensor<32x2xi32>
+  %b16 = arith.constant dense<0> : tensor<16xi32>
+  %rq16 = arith.constant dense<1073741824> : tensor<16x2xi32>
+  %0 = knpu.conv2d %in, %w1, %b32, %rq32 {stride = array<i64: 1, 1>,
+      pad = array<i64: 0, 0, 0, 0>, input_zp = 0 : i64, output_zp = 0 : i64,
+      clamp = array<i64: -128, 127>, round = "double"}
+      : (tensor<1x6x8x1xi8>, tensor<32x1x1x1xi8>, tensor<32xi32>,
+         tensor<32x2xi32>) -> tensor<1x6x8x32xi8>
+  %1 = knpu.conv2d %0, %w2, %b16, %rq16 {stride = array<i64: 1, 1>,
+      pad = array<i64: 0, 0, 0, 0>, input_zp = 0 : i64, output_zp = 0 : i64,
+      clamp = array<i64: -128, 127>, round = "double"}
+      : (tensor<1x6x8x32xi8>, tensor<16x1x1x32xi8>, tensor<16xi32>,
+         tensor<16x2xi32>) -> tensor<1x6x8x16xi8>
+  %2 = knpu.conv2d %1, %w3, %b32, %rq32 {stride = array<i64: 1, 1>,
+      pad = array<i64: 0, 0, 0, 0>, input_zp = 0 : i64, output_zp = 0 : i64,
+      clamp = array<i64: -128, 127>, round = "double"}
+      : (tensor<1x6x8x16xi8>, tensor<32x1x1x16xi8>, tensor<32xi32>,
+         tensor<32x2xi32>) -> tensor<1x6x8x32xi8>
+  %3 = knpu.conv2d %2, %w2, %b16, %rq16 {stride = array<i64: 1, 1>,
+      pad = array<i64: 0, 0, 0, 0>, input_zp = 0 : i64, output_zp = 0 : i64,
+      clamp = array<i64: -128, 127>, round = "double"}
+      : (tensor<1x6x8x32xi8>, tensor<16x1x1x32xi8>, tensor<16xi32>,
+         tensor<16x2xi32>) -> tensor<1x6x8x16xi8>
+  return %3 : tensor<1x6x8x16xi8>
+}
+
+// CHECK-LABEL: module attributes {knpu.sram_size = 4096 : i64}
+// CHECK: knpu.region 1 "arena" size 816
+// CHECK-LABEL: func.func @knpu_model() {
+// CHECK-NEXT: knpu.dma "load" region 0[0] sram[2432] length 416
+// CHECK-NEXT: knpu.dma "load" region 1[0] sram[2848] length 48
+// CHECK-NEXT: knpu.dma "load" region 0[416] sram[3200] length 704
+// CHECK-NEXT: knpu.conv {{{.*}}ifm = 2848 : i64{{.*}}ofm = 0 : i64{{.*}}weight = 2432 : i64}
+// CHECK-NEXT: knpu.dma "load" region 0[1120] sram[1536] length 896
+// CHECK-NEXT: knpu.conv {{{.*}}ifm = 0 : i64{{.*}}ofm = 2432 : i64{{.*}}weight = 3200 : i64}
+// CHECK-NEXT: knpu.dma "load" region 0[2016] sram[3200] length 704
+// CHECK-NEXT: knpu.conv {{{.*}}ifm = 2432 : i64{{.*}}ofm = 0 : i64{{.*}}weight = 1536 : i64}
+// CHECK-NEXT: knpu.conv {{{.*}}ifm = 0 : i64{{.*}}ofm = 1536 : i64{{.*}}weight = 3200 : i64}
+// CHECK-NEXT: knpu.dma "store" region 1[48] sram[1536] length 768
+// CHECK-NEXT: knpu.stop
+
+// LARGEST: knpu.region 1 "arena" size 3120
+// LARGEST-NEXT: knpu.io "input" region 1[0] shape [1, 6, 8, 1]
+// LARGEST-NEXT: knpu.io "output" region 1[2352] shape [1, 6, 8, 16]
+// LARGEST-NEXT: func.func @knpu_model() {
+// LARGEST-NEXT: knpu.dma "load" region 0[0] sram[0] length 416
+// LARGEST-NEXT: knpu.dma "load" region 1[0] sram[416] length 48
+// LARGEST-NEXT: knpu.conv {{{.*}}ifm = 416 : i64{{.*}}ofm = 2240 : i64{{.*}}weight = 0 : i64}
+// LARGEST-NEXT: knpu.dma "store" region 1[48] sram[2240] length 1536
+// LARGEST-NEXT: knpu.dma "load" region 0[416] sram[0] length 704
+// LARGEST-NEXT: knpu.dma "load" region 1[48] sram[2240] length 1536
+// LARGEST-NEXT: knpu.conv {{{.*}}ifm = 2240 : i64{{.*}}ofm = 704 : i64{{.*}}weight = 0 : i64}
+// LARGEST-NEXT: knpu.dma "store" region 1[1584] sram[704] length 768
+// LARGEST-NEXT: knpu.dma "load" region 0[1120] sram[2240] length 896
+// LARGEST-NEXT: knpu.dma "load" region 1[1584] sram[3136] length 768
+// LARGEST-NEXT: knpu.dma "load" region 0[2016] sram[1536] length 704
+// LARGEST-NEXT: knpu.conv {{{.*}}ifm = 3136 : i64{{.*}}ofm = 0 : i64{{.*}}weight = 2240 : i64}
+// LARGEST-NEXT: knpu.conv {{{.*}}ifm = 0 : i64{{.*}}ofm = 2240 : i64{{.*}}weight = 1536 : i64}
+// LARGEST-NEXT: knpu.dma "store" region 1[2352] sram[2240] length 768
+// LARGEST-NEXT: knpu.stop

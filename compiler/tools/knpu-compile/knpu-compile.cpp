@@ -4,12 +4,18 @@
 // knpu-compile: compiles the .mlir that lcc writes for a tflite2c model
 // (lcc -S -Wf-pragma=knpu) into model.knpu. It runs knpu-import, knpu-tile,
 // knpu-schedule, knpu-insert-waits and knpu-estimate and then the model
-// file writer. With cpu layers it moves their functions into the CPU
-// module and compiles that with lcc-opt, mlir-translate, clang and ld.lld
-// into the CPU code of the model (docs/design.md 9.4).
+// file writer. knpu-schedule runs with both of its SRAM placement rules,
+// each followed by knpu-insert-waits and knpu-estimate on a copy of the
+// tiled module, and the one with fewer estimated cycles is kept (the
+// current rule on a tie): the current rule chooses greedily and is slower
+// than the one before it on some models. With cpu layers it moves their
+// functions into the CPU module and compiles that with lcc-opt,
+// mlir-translate, clang and ld.lld into the CPU code of the model
+// (docs/design.md 9.4).
 //
 //   knpu-compile model.mlir -o model.knpu [--sram-size=BYTES]
-//                [--overlap=false] [--report] [--emit-mlir]
+//                [--overlap=false] [--placement=cost|largest]
+//                [--report] [--emit-mlir]
 //                [--emit-cpu-mlir] [--insert-waits=false]
 //                [--macs-per-cycle=N] [--dma-bytes-per-cycle=N]
 //                [--pool-elements-per-cycle=N]
@@ -52,6 +58,14 @@ static cl::opt<bool> overlap(
     cl::desc("Keep activations in SRAM and load constants and tiles ahead "
              "(false: the serial schedule, for comparison)"),
     cl::init(true));
+static cl::opt<knpu::Placement> placement(
+    "placement",
+    cl::desc("Lay out SRAM with this rule of knpu-schedule instead of the "
+             "one that gives fewer estimated cycles"),
+    cl::values(clEnumValN(knpu::Placement::Cost, "cost",
+                          "the current rule (kept on a tie)"),
+               clEnumValN(knpu::Placement::Largest, "largest",
+                          "the rule before M3.6")));
 static cl::opt<bool> report(
     "report",
     cl::desc("Print the estimated cycles per layer and in total to stdout"),
@@ -106,11 +120,26 @@ static StringRef layerName(Location loc) {
   return "?";
 }
 
+/// The estimated cycles of the whole job (knpu-estimate), or 0.
+static int64_t totalCycles(ModuleOp module) {
+  auto fn = module.lookupSymbol<func::FuncOp>(knpu::kModelFunc);
+  auto total =
+      fn ? fn->getAttrOfType<IntegerAttr>(knpu::kTotalCyclesAttr) : nullptr;
+  return total ? total.getInt() : 0;
+}
+
+static StringRef placementName(knpu::Placement rule) {
+  return rule == knpu::Placement::Cost ? "cost" : "largest";
+}
+
 /// Per layer, in the order of their first operation command: the
 /// operations, the bytes and the cycles (from knpu-estimate) of the layer's
 /// commands. The DMAs of constants loaded ahead count for the layer that
-/// uses them.
-static void printReport(ModuleOp module, llvm::raw_ostream &os) {
+/// uses them. Then the total and, with overlap, the SRAM placement rule
+/// kept, with the total of the other rule when both were tried.
+static void printReport(ModuleOp module, knpu::Placement rule,
+                        std::optional<int64_t> otherCycles,
+                        llvm::raw_ostream &os) {
   auto fn = module.lookupSymbol<func::FuncOp>(knpu::kModelFunc);
   struct Row {
     std::string op;
@@ -162,8 +191,14 @@ static void printReport(ModuleOp module, llvm::raw_ostream &os) {
                        span(row.opStart, row.opEnd).c_str(),
                        static_cast<long long>(row.dmaBytes),
                        span(row.dmaStart, row.dmaEnd).c_str());
-  auto total = fn->getAttrOfType<IntegerAttr>(knpu::kTotalCyclesAttr);
-  os << "  total cycles " << (total ? total.getInt() : 0) << "\n";
+  os << "  total cycles " << totalCycles(module) << "\n";
+  if (!overlap)
+    return;
+  os << "  SRAM placement " << placementName(rule);
+  if (otherCycles)
+    os << " (" << (rule == knpu::Placement::Cost ? "largest" : "cost")
+       << ": " << *otherCycles << " cycles)";
+  os << "\n";
 }
 
 int main(int argc, char **argv) {
@@ -211,20 +246,52 @@ int main(int argc, char **argv) {
   tileOptions.sramSize = sramSize;
   tileOptions.overlap = overlap;
   pm.addPass(knpu::createKnpuTile(tileOptions));
-  knpu::KnpuScheduleOptions scheduleOptions;
-  scheduleOptions.sramSize = sramSize;
-  scheduleOptions.overlap = overlap;
-  pm.addPass(knpu::createKnpuSchedule(scheduleOptions));
-  if (insertWaits)
-    pm.addPass(knpu::createKnpuInsertWaits());
+  if (failed(pm.run(*module)))
+    return 1;
+
+  // knpu-schedule with one SRAM placement rule, then knpu-insert-waits and
+  // knpu-estimate, on a copy of the tiled module
   knpu::KnpuEstimateOptions estimateOptions;
   estimateOptions.macsPerCycle = macsPerCycle;
   estimateOptions.dmaBytesPerCycle = dmaBytesPerCycle;
   estimateOptions.poolElementsPerCycle = poolElementsPerCycle;
   estimateOptions.addElementsPerCycle = addElementsPerCycle;
-  pm.addPass(knpu::createKnpuEstimate(estimateOptions));
-  if (failed(pm.run(*module)))
+  auto schedule = [&](knpu::Placement rule) -> OwningOpRef<ModuleOp> {
+    OwningOpRef<ModuleOp> copy(module->clone());
+    PassManager spm(&context);
+    if (failed(applyPassManagerCLOptions(spm)))
+      return nullptr;
+    knpu::KnpuScheduleOptions scheduleOptions;
+    scheduleOptions.sramSize = sramSize;
+    scheduleOptions.overlap = overlap;
+    scheduleOptions.placement = rule;
+    spm.addPass(knpu::createKnpuSchedule(scheduleOptions));
+    if (insertWaits)
+      spm.addPass(knpu::createKnpuInsertWaits());
+    spm.addPass(knpu::createKnpuEstimate(estimateOptions));
+    if (failed(spm.run(*copy)))
+      return nullptr;
+    return copy;
+  };
+  // Both rules unless --placement chooses one; without overlap there is
+  // nothing to give up and both give the serial schedule
+  bool fixed = placement.getNumOccurrences() > 0;
+  knpu::Placement rule = fixed ? placement.getValue() : knpu::Placement::Cost;
+  OwningOpRef<ModuleOp> scheduled = schedule(rule);
+  if (!scheduled)
     return 1;
+  std::optional<int64_t> otherCycles;
+  if (!fixed && overlap) {
+    OwningOpRef<ModuleOp> other = schedule(knpu::Placement::Largest);
+    if (!other)
+      return 1;
+    if (totalCycles(*other) < totalCycles(*scheduled)) {
+      std::swap(scheduled, other);
+      rule = knpu::Placement::Largest;
+    }
+    otherCycles = totalCycles(*other);
+  }
+  module = std::move(scheduled);
 
   // The cpu layers leave the module for the CPU module, which becomes the
   // AArch64 shared object of knpu.cpu_code (docs/design.md 9.4)
@@ -260,6 +327,6 @@ int main(int argc, char **argv) {
     return 1;
   output->keep();
   if (report)
-    printReport(*module, llvm::outs());
+    printReport(*module, rule, otherCycles, llvm::outs());
   return 0;
 }
