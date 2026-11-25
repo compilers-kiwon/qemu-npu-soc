@@ -141,19 +141,21 @@ static int64_t elements(ArrayRef<int64_t> hwc) {
   return hwc[0] * hwc[1] * hwc[2];
 }
 
-enum class Kind { Conv, Fc, AvgPool, Reshape, Cpu };
+enum class Kind { Conv, Fc, AvgPool, Add, Reshape, Cpu };
 
 /// One layer function, checked. Shapes are (H, W, C); a fully connected
-/// layer's are (1, 1, size), with a 1x1 kernel.
+/// layer's are (1, 1, size), with a 1x1 kernel. An add has a second input
+/// of the input shape.
 struct Layer {
   Kind kind;
   func::FuncOp func;
   StringRef op; // pragma operation
-  StringRef in, out;
+  StringRef in, in2, out;
   SmallVector<int64_t> inShape, outShape, kernel, stride, pad, clamp;
-  int64_t inZp = 0, outZp = 0; // a reshape's come from its input
+  int64_t inZp = 0, in2Zp = 0, outZp = 0; // a reshape's come from its input
   std::vector<int8_t> weight;
   std::vector<int32_t> bias, rq; // rq: multiplier, shift per channel
+  SmallVector<int64_t> inScale, in2Scale, outScale; // add: multiplier, shift
   SmallVector<LLVM::GlobalOp> globals;
 
   bool onNpu() const { return kind != Kind::Cpu; }
@@ -161,7 +163,7 @@ struct Layer {
   StringRef inZpKey() const { return kind == Kind::AvgPool ? "zp" : "in_zp"; }
 };
 
-/// in and out: writable arrays of the layer's shapes.
+/// in and out (and in2 of an add): writable arrays of the layer's shapes.
 static LogicalResult readActivations(PragmaArgs &args, Layer &l) {
   auto in = args.global("in"), out = args.global("out");
   if (failed(in) || failed(out))
@@ -170,16 +172,26 @@ static LogicalResult readActivations(PragmaArgs &args, Layer &l) {
   l.out = out->getSymName();
   if (l.in == l.out)
     return args.error() << "'in' and 'out' must be different arrays";
-  for (auto [key, g, shape] : {std::tuple{"in", *in, &l.inShape},
-                               std::tuple{"out", *out, &l.outShape}}) {
-    int64_t n = elements(*shape);
+  SmallVector<std::tuple<const char *, LLVM::GlobalOp, ArrayRef<int64_t>>>
+      arrays = {{"in", *in, l.inShape}, {"out", *out, l.outShape}};
+  if (l.kind == Kind::Add) {
+    auto in2 = args.global("in2");
+    if (failed(in2))
+      return failure();
+    l.in2 = in2->getSymName();
+    if (l.in2 == l.out)
+      return args.error() << "'in2' and 'out' must be different arrays";
+    arrays.push_back({"in2", *in2, l.inShape});
+  }
+  for (auto [key, g, shape] : arrays) {
+    int64_t n = elements(shape);
     if (g.getConstant())
       return args.error(key) << "must not be const";
     auto size = byteSize(g.getGlobalType());
     if (!size || *size != n)
       return args.error(key) << "must be an array of " << n << " bytes";
+    l.globals.push_back(g);
   }
-  l.globals.append({*in, *out});
   return success();
 }
 
@@ -227,7 +239,7 @@ static LogicalResult readConstants(PragmaArgs &args, Layer &l,
 }
 
 static LogicalResult checkZeroPoints(PragmaArgs &args, const Layer &l) {
-  if (!isInt8(l.inZp) || !isInt8(l.outZp))
+  if (!isInt8(l.inZp) || !isInt8(l.in2Zp) || !isInt8(l.outZp))
     return args.error() << "zero points must be in -128..127";
   return success();
 }
@@ -326,6 +338,47 @@ static FailureOr<Layer> readAvgPool(PragmaArgs &args, Layer l) {
   if (failed(checkZeroPoints(args, l)) ||
       failed(checkPositive(args, {l.inShape, l.outShape, l.kernel, l.stride},
                            "shapes, kernel and stride")) ||
+      failed(readActivations(args, l)))
+    return failure();
+  return l;
+}
+
+/// #pragma knpu add: two inputs and an output of one shape
+static FailureOr<Layer> readAdd(PragmaArgs &args, Layer l) {
+  if (failed(args.expectKeys({"in", "in2", "out", "shape", "in_zp", "in2_zp",
+                              "out_zp", "in_mult", "in_shift", "in2_mult",
+                              "in2_shift", "out_mult", "out_shift",
+                              "clamp"})))
+    return failure();
+  auto shape = args.list("shape", 3), clamp = args.list("clamp", 2);
+  auto inZp = args.integer("in_zp"), in2Zp = args.integer("in2_zp"),
+       outZp = args.integer("out_zp");
+  if (failed(shape) || failed(clamp) || failed(inZp) || failed(in2Zp) ||
+      failed(outZp))
+    return failure();
+  // The multiplier and shift of each input and of the output, in the
+  // ranges of SET_IFM_SCALE, SET_IFM2_SCALE and SET_OFM_SCALE
+  // (docs/npu-spec.md 6.1)
+  for (auto [multKey, shiftKey, scale] :
+       {std::tuple{"in_mult", "in_shift", &l.inScale},
+        std::tuple{"in2_mult", "in2_shift", &l.in2Scale},
+        std::tuple{"out_mult", "out_shift", &l.outScale}}) {
+    auto mult = args.integer(multKey), shift = args.integer(shiftKey);
+    if (failed(mult) || failed(shift))
+      return failure();
+    if (*mult < 0 || *mult > 0x7FFFFFFF)
+      return args.error(multKey) << "must be in 0..2^31-1";
+    if (*shift < -31 || *shift > 0)
+      return args.error(shiftKey) << "must be in -31..0";
+    *scale = {*mult, *shift};
+  }
+  l.inShape = l.outShape = *shape;
+  l.clamp = *clamp;
+  l.inZp = *inZp;
+  l.in2Zp = *in2Zp;
+  l.outZp = *outZp;
+  if (failed(checkZeroPoints(args, l)) ||
+      failed(checkPositive(args, {l.inShape}, "shape")) ||
       failed(readActivations(args, l)))
     return failure();
   return l;
@@ -496,6 +549,9 @@ void ImportPass::runOnOperation() {
     } else if (op == "avgpool") {
       l.kind = Kind::AvgPool;
       layer = readAvgPool(args, l);
+    } else if (op == "add") {
+      l.kind = Kind::Add;
+      layer = readAdd(args, l);
     } else if (op == "reshape") {
       l.kind = Kind::Reshape;
       layer = readReshape(args, l);
@@ -525,7 +581,9 @@ void ImportPass::runOnOperation() {
       return signalPassFailure();
     }
 
-  // Data flow by array name: what each array holds after every layer
+  // Data flow by array name: what each array holds after every layer. An
+  // array may feed several layers (a residual connection), and an add
+  // reads two.
   struct Tensor {
     SmallVector<int64_t> shape; // H, W, C
     int64_t zp;
@@ -536,32 +594,39 @@ void ImportPass::runOnOperation() {
   std::optional<SmallVector<int64_t>> inShape;
   for (auto [i, l] : llvm::enumerate(layers)) {
     PragmaArgs args(l.func, l.op, argsOf(l.func), symbols);
-    if (l.in == inName && !live.count(inName)) {
-      if (l.kind == Kind::Reshape) {
-        l.inZp = *mInZp;
-      } else if (l.inZp != *mInZp) {
-        args.error(l.inZpKey()) << "differs from in_zp of the model";
+    // The arrays the layer reads: key, array, zero point and its key
+    SmallVector<std::tuple<StringRef, StringRef, int64_t *, StringRef>, 2>
+        reads = {{"in", l.in, &l.inZp, l.inZpKey()}};
+    if (l.kind == Kind::Add)
+      reads.push_back({"in2", l.in2, &l.in2Zp, "in2_zp"});
+    for (auto [key, name, zp, zpKey] : reads) {
+      if (name == inName && !live.count(inName)) {
+        if (l.kind == Kind::Reshape) {
+          *zp = *mInZp;
+        } else if (*zp != *mInZp) {
+          args.error(zpKey) << "differs from in_zp of the model";
+          return signalPassFailure();
+        }
+        inShape = l.inShape;
+        live[inName] = {l.inShape, *zp, -1};
+      }
+      auto it = live.find(name);
+      if (it == live.end()) {
+        args.error(key) << "is neither the model input nor the output of an "
+                           "earlier layer";
         return signalPassFailure();
       }
-      inShape = l.inShape;
-      live[inName] = {l.inShape, l.inZp, -1};
-    }
-    auto it = live.find(l.in);
-    if (it == live.end()) {
-      args.error("in") << "is neither the model input nor the output of an "
-                          "earlier layer";
-      return signalPassFailure();
-    }
-    // A fully connected layer reads the bytes of any shape as its vector
-    bool shapeOk = l.kind == Kind::Fc
-                       ? elements(it->second.shape) == l.inShape[2]
-                       : it->second.shape == l.inShape;
-    if (l.kind == Kind::Reshape)
-      l.inZp = l.outZp = it->second.zp;
-    if (!shapeOk || it->second.zp != l.inZp) {
-      args.error("in") << "shape or zero point differs from where '" << l.in
-                       << "' was written";
-      return signalPassFailure();
+      // A fully connected layer reads the bytes of any shape as its vector
+      bool shapeOk = l.kind == Kind::Fc
+                         ? elements(it->second.shape) == l.inShape[2]
+                         : it->second.shape == l.inShape;
+      if (l.kind == Kind::Reshape)
+        l.inZp = l.outZp = it->second.zp;
+      if (!shapeOk || it->second.zp != *zp) {
+        args.error(key) << "shape or zero point differs from where '" << name
+                        << "' was written";
+        return signalPassFailure();
+      }
     }
     live[l.out] = {l.outShape, l.outZp, static_cast<int>(i)};
   }
@@ -642,6 +707,15 @@ void ImportPass::runOnOperation() {
                                 b.getDenseI64ArrayAttr(l.stride),
                                 b.getDenseI64ArrayAttr(l.pad),
                                 b.getDenseI64ArrayAttr(l.clamp));
+      break;
+    case Kind::Add:
+      out = AddOp::create(
+          b, lloc, actType(l.outShape), in, values[l.in2],
+          b.getI64IntegerAttr(l.inZp), b.getI64IntegerAttr(l.in2Zp),
+          b.getI64IntegerAttr(l.outZp), b.getDenseI64ArrayAttr(l.inScale),
+          b.getDenseI64ArrayAttr(l.in2Scale),
+          b.getDenseI64ArrayAttr(l.outScale),
+          b.getDenseI64ArrayAttr(l.clamp), b.getStringAttr(*round));
       break;
     case Kind::Reshape:
       out = reshape(in, actType(l.outShape));

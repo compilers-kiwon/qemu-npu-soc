@@ -14,12 +14,14 @@ def KnpuImport : Pass<"knpu-import", "::mlir::ModuleOp"> {
     functions and on the model function (docs/design.md 9.3) and builds
     `func.func @knpu_model(tensor) -> tensor` with one operation per layer
     call: `knpu.conv2d` for conv2d and fc (a 1x1 convolution),
-    `knpu.avgpool`, `tensor.reshape` and `knpu.cpu`. Constant globals become
-    dense constants; the requantization table is the (multiplier, shift)
-    pair of every output channel. The converted NPU layer functions, the
-    `knpu.*` attributes and the globals nothing uses any more are removed.
-    The functions of cpu layers stay, with external linkage, for the CPU
-    code; they may only follow the last NPU layer.
+    `knpu.avgpool`, `knpu.add`, `tensor.reshape` and `knpu.cpu`. Layers are
+    connected by array name, so that one tensor may feed several layers (a
+    residual connection). Constant globals become dense constants; the
+    requantization table is the (multiplier, shift) pair of every output
+    channel. The converted NPU layer functions, the `knpu.*` attributes and
+    the globals nothing uses any more are removed. The functions of cpu
+    layers stay, with external linkage, for the CPU code; they may only
+    follow the last NPU layer.
   }];
   let dependentDialects = [
     "::mlir::knpu::KnpuDialect",

@@ -198,3 +198,46 @@ llvm.mlir.global external @"a2"() {alignment = 1 : i64} : !llvm.array<1 x i8>
 // CHECK: %[[R:.*]] = tensor.reshape %[[A1]](%[[SHAPE]]) : (tensor<1x1x2x2xi8>, tensor<4xindex>) -> tensor<1x1x1x4xi8>
 // CHECK: %[[A2:.*]] = knpu.conv2d %[[R]], {{.*}} : (tensor<1x1x1x4xi8>, tensor<1x1x1x4xi8>, tensor<1xi32>, tensor<1x2xi32>) -> tensor<1x1x1x1xi8>
 // CHECK: return %[[A2]]
+
+// -----
+
+// A residual connection: a1 feeds the second conv and the add, which adds
+// the conv's output to it. The add keeps its zero points, scales and clamp;
+// the rounding mode comes from the model.
+
+module {
+llvm.mlir.global internal constant @"W1"("\01\01") {alignment = 1 : i64} : !llvm.array<2 x i8>
+llvm.mlir.global internal constant @"W2"("\02\02\02\02") {alignment = 1 : i64} : !llvm.array<4 x i8>
+llvm.mlir.global internal constant @"Z2"("\00\00\00\00\00\00\00\00") {alignment = 4 : i64} : !llvm.array<8 x i8>
+llvm.mlir.global internal constant @"M2"("\00\00\00@\00\00\00@") {alignment = 4 : i64} : !llvm.array<8 x i8>
+llvm.mlir.global internal constant @"S2"("\00\00\00\00\FF\FF\FF\FF") {alignment = 4 : i64} : !llvm.array<8 x i8>
+llvm.mlir.global internal constant @"SC"(0x3F800000 : f32) {alignment = 4 : i64} : f32
+func.func @"l1"() attributes {llvm.linkage = #llvm.linkage<internal>, knpu.op = "conv2d", knpu.args = {in = @"a0", out = @"a1", w = @"W1", bias = @"Z2", mult = @"M2", shift = @"S2", in_shape = array<i64: 2, 2, 1>, out_shape = array<i64: 2, 2, 2>, kernel = array<i64: 1, 1>, stride = array<i64: 1, 1>, pad = array<i64: 0, 0, 0, 0>, in_zp = 0 : i64, out_zp = 3 : i64, clamp = array<i64: -128, 127>}} {
+  func.return
+}
+func.func @"l2"() attributes {llvm.linkage = #llvm.linkage<internal>, knpu.op = "conv2d", knpu.args = {in = @"a1", out = @"a2", w = @"W2", bias = @"Z2", mult = @"M2", shift = @"S2", in_shape = array<i64: 2, 2, 2>, out_shape = array<i64: 2, 2, 2>, kernel = array<i64: 1, 1>, stride = array<i64: 1, 1>, pad = array<i64: 0, 0, 0, 0>, in_zp = 3 : i64, out_zp = -4 : i64, clamp = array<i64: -128, 127>}} {
+  func.return
+}
+func.func @"l3"() attributes {llvm.linkage = #llvm.linkage<internal>, knpu.op = "add", knpu.args = {in = @"a1", in2 = @"a2", out = @"a3", shape = array<i64: 2, 2, 2>, in_zp = 3 : i64, in2_zp = -4 : i64, out_zp = -128 : i64, in_mult = 1073741824 : i64, in_shift = 0 : i64, in2_mult = 1359676495 : i64, in2_shift = -2 : i64, out_mult = 1127607261 : i64, out_shift = -17 : i64, clamp = array<i64: -128, 127>}} {
+  func.return
+}
+func.func @"knpu_model"() attributes {knpu.op = "model", knpu.args = {in = @"a0", out = @"a3", in_scale = @"SC", in_zp = 0 : i64, out_scale = @"SC", out_zp = -128 : i64, round = "single"}} {
+  func.call @"l1"() : () -> ()
+  func.call @"l2"() : () -> ()
+  func.call @"l3"() : () -> ()
+  func.return
+}
+llvm.mlir.global external @"a0"() {alignment = 1 : i64} : !llvm.array<4 x i8>
+llvm.mlir.global external @"a1"() {alignment = 1 : i64} : !llvm.array<8 x i8>
+llvm.mlir.global external @"a2"() {alignment = 1 : i64} : !llvm.array<8 x i8>
+llvm.mlir.global external @"a3"() {alignment = 1 : i64} : !llvm.array<8 x i8>
+}
+
+// CHECK-LABEL: func.func @knpu_model(
+// CHECK-SAME: %[[IN:.*]]: tensor<1x2x2x1xi8>
+// CHECK-SAME: -> (tensor<1x2x2x2xi8> {knpu.scale = 1.000000e+00 : f32, knpu.zero_point = -128 : i64})
+// CHECK: %[[A1:.*]] = knpu.conv2d %[[IN]], {{.*}} -> tensor<1x2x2x2xi8>
+// CHECK: %[[A2:.*]] = knpu.conv2d %[[A1]], {{.*}} -> tensor<1x2x2x2xi8>
+// CHECK: %[[A3:.*]] = knpu.add %[[A1]], %[[A2]] {clamp = array<i64: -128, 127>, input2_scale = array<i64: 1359676495, -2>, input2_zp = -4 : i64, input_scale = array<i64: 1073741824, 0>, input_zp = 3 : i64, output_scale = array<i64: 1127607261, -17>, output_zp = -128 : i64, round = "single"} : (tensor<1x2x2x2xi8>, tensor<1x2x2x2xi8>) -> tensor<1x2x2x2xi8>
+// CHECK: return %[[A3]]
+// CHECK-NOT: llvm.mlir.global

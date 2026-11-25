@@ -257,8 +257,8 @@ llvm.mlir.global internal constant @S("\00\00\00\00") : !llvm.array<4 x i8>
 llvm.mlir.global internal constant @SC(1.0 : f32) : f32
 llvm.mlir.global external @a0() : !llvm.array<1 x i8>
 llvm.mlir.global external @a1() : !llvm.array<1 x i8>
-// expected-error @+1 {{#pragma knpu add is not supported}}
-func.func @l1() attributes {knpu.op = "add", knpu.args = {in = @a0, out = @a1, w = @W, bias = @B, mult = @M, shift = @S, in_shape = array<i64: 1, 1, 1>, out_shape = array<i64: 1, 1, 1>, kernel = array<i64: 1, 1>, stride = array<i64: 1, 1>, pad = array<i64: 0, 0, 0, 0>, in_zp = 0, out_zp = 0, clamp = array<i64: -128, 127>}} {
+// expected-error @+1 {{#pragma knpu maxpool is not supported}}
+func.func @l1() attributes {knpu.op = "maxpool", knpu.args = {in = @a0, out = @a1, w = @W, bias = @B, mult = @M, shift = @S, in_shape = array<i64: 1, 1, 1>, out_shape = array<i64: 1, 1, 1>, kernel = array<i64: 1, 1>, stride = array<i64: 1, 1>, pad = array<i64: 0, 0, 0, 0>, in_zp = 0, out_zp = 0, clamp = array<i64: -128, 127>}} {
   func.return
 }
 func.func @knpu_model() attributes {knpu.op = "model", knpu.args = {in = @a0, out = @a1, in_scale = @SC, in_zp = 0, out_scale = @SC, out_zp = 0, round = "double"}} {
@@ -448,6 +448,84 @@ func.func @l2() attributes {knpu.op = "conv2d", knpu.args = {in = @a1, out = @a2
 func.func @knpu_model() attributes {knpu.op = "model", knpu.args = {in = @a0, out = @a2, in_scale = @SC, in_zp = 0, out_scale = @SC, out_zp = 0, round = "double"}} {
   func.call @l1() : () -> ()
   func.call @l2() : () -> ()
+  func.return
+}
+}
+
+// -----
+
+// An add whose second input is not written before it.
+
+module {
+llvm.mlir.global internal constant @SC(1.0 : f32) : f32
+llvm.mlir.global external @a0() : !llvm.array<2 x i8>
+llvm.mlir.global external @a1() : !llvm.array<2 x i8>
+llvm.mlir.global external @a2() : !llvm.array<2 x i8>
+// expected-error @+1 {{#pragma knpu add: 'in2' is neither the model input nor the output of an earlier layer}}
+func.func @l1() attributes {knpu.op = "add", knpu.args = {in = @a0, in2 = @a1, out = @a2, shape = array<i64: 1, 1, 2>, in_zp = 0, in2_zp = 0, out_zp = 0, in_mult = 1073741824, in_shift = 0, in2_mult = 1073741824, in2_shift = 0, out_mult = 1073741824, out_shift = -19, clamp = array<i64: -128, 127>}} {
+  func.return
+}
+func.func @knpu_model() attributes {knpu.op = "model", knpu.args = {in = @a0, out = @a2, in_scale = @SC, in_zp = 0, out_scale = @SC, out_zp = 0, round = "double"}} {
+  func.call @l1() : () -> ()
+  func.return
+}
+}
+
+// -----
+
+// An add whose second input zero point is not that of the array it reads.
+
+module {
+llvm.mlir.global internal constant @SC(1.0 : f32) : f32
+llvm.mlir.global external @a0() : !llvm.array<2 x i8>
+llvm.mlir.global external @a1() : !llvm.array<2 x i8>
+llvm.mlir.global external @a2() : !llvm.array<2 x i8>
+func.func @l1() attributes {knpu.op = "add", knpu.args = {in = @a0, in2 = @a0, out = @a1, shape = array<i64: 1, 1, 2>, in_zp = 0, in2_zp = 0, out_zp = 5, in_mult = 1073741824, in_shift = 0, in2_mult = 1073741824, in2_shift = 0, out_mult = 1073741824, out_shift = -19, clamp = array<i64: -128, 127>}} {
+  func.return
+}
+// expected-error @+1 {{#pragma knpu add: 'in2' shape or zero point differs from where 'a1' was written}}
+func.func @l2() attributes {knpu.op = "add", knpu.args = {in = @a0, in2 = @a1, out = @a2, shape = array<i64: 1, 1, 2>, in_zp = 0, in2_zp = 0, out_zp = 0, in_mult = 1073741824, in_shift = 0, in2_mult = 1073741824, in2_shift = 0, out_mult = 1073741824, out_shift = -19, clamp = array<i64: -128, 127>}} {
+  func.return
+}
+func.func @knpu_model() attributes {knpu.op = "model", knpu.args = {in = @a0, out = @a2, in_scale = @SC, in_zp = 0, out_scale = @SC, out_zp = 0, round = "double"}} {
+  func.call @l1() : () -> ()
+  func.call @l2() : () -> ()
+  func.return
+}
+}
+
+// -----
+
+// An add with a shift above 0, which SET_OFM_SCALE does not take.
+
+module {
+llvm.mlir.global internal constant @SC(1.0 : f32) : f32
+llvm.mlir.global external @a0() : !llvm.array<2 x i8>
+llvm.mlir.global external @a1() : !llvm.array<2 x i8>
+// expected-error @+1 {{#pragma knpu add: 'out_shift' must be in -31..0}}
+func.func @l1() attributes {knpu.op = "add", knpu.args = {in = @a0, in2 = @a0, out = @a1, shape = array<i64: 1, 1, 2>, in_zp = 0, in2_zp = 0, out_zp = 0, in_mult = 1073741824, in_shift = 0, in2_mult = 1073741824, in2_shift = 0, out_mult = 1073741824, out_shift = 1, clamp = array<i64: -128, 127>}} {
+  func.return
+}
+func.func @knpu_model() attributes {knpu.op = "model", knpu.args = {in = @a0, out = @a1, in_scale = @SC, in_zp = 0, out_scale = @SC, out_zp = 0, round = "double"}} {
+  func.call @l1() : () -> ()
+  func.return
+}
+}
+
+// -----
+
+// An add that writes its second input.
+
+module {
+llvm.mlir.global internal constant @SC(1.0 : f32) : f32
+llvm.mlir.global external @a0() : !llvm.array<2 x i8>
+llvm.mlir.global external @a1() : !llvm.array<2 x i8>
+// expected-error @+1 {{#pragma knpu add: 'in2' and 'out' must be different arrays}}
+func.func @l1() attributes {knpu.op = "add", knpu.args = {in = @a0, in2 = @a1, out = @a1, shape = array<i64: 1, 1, 2>, in_zp = 0, in2_zp = 0, out_zp = 0, in_mult = 1073741824, in_shift = 0, in2_mult = 1073741824, in2_shift = 0, out_mult = 1073741824, out_shift = -19, clamp = array<i64: -128, 127>}} {
+  func.return
+}
+func.func @knpu_model() attributes {knpu.op = "model", knpu.args = {in = @a0, out = @a1, in_scale = @SC, in_zp = 0, out_scale = @SC, out_zp = 0, round = "double"}} {
+  func.call @l1() : () -> ()
   func.return
 }
 }
