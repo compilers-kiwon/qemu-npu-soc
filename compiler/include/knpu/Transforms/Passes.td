@@ -32,7 +32,8 @@ def KnpuImport : Pass<"knpu-import", "::mlir::ModuleOp"> {
 }
 
 def KnpuTile : Pass<"knpu-tile", "::mlir::ModuleOp"> {
-  let summary = "Split layers into output-row tiles that fit in SRAM";
+  let summary = "Split layers into output-row and output-channel tiles that "
+                "fit in SRAM";
   let description = [{
     A layer whose constants, inputs and output fit in `sram-size` stays
     whole. Otherwise its output rows are split into tiles so that the
@@ -40,8 +41,14 @@ def KnpuTile : Pass<"knpu-tile", "::mlir::ModuleOp"> {
     buffering) fit, or one of each with `overlap=false`; every tile is a
     `knpu.conv2d`, `knpu.avgpool` or `knpu.add` on `tensor.extract_slice`s
     of the inputs (an add reads the same rows of both) with its own padding,
-    put together with `tensor.insert_slice`. A layer with one output row,
-    such as a fully connected layer, is not split.
+    put together with `tensor.insert_slice`. A convolution that does not
+    fit even with one-row tiles, such as a fully connected layer with large
+    weights, is split into output-channel tiles with the most channels: each
+    takes the channel range of the weights, bias and requantization table,
+    whose two buffers then count as well, and writes those channels of the
+    output. The tiles read the whole input if it fits beside them, and are
+    output-row tiles as well otherwise. A layer that does not fit even so
+    is an error.
   }];
   let options = [
     Option<"sramSize", "sram-size", "int64_t", "65536",

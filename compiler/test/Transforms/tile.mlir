@@ -85,19 +85,20 @@ func.func @stride2(%in: tensor<1x32x16x8xi8>, %w: tensor<8x3x3x8xi8>,
 
 // -----
 
-// Weights alone (36,864 bytes) exceed 4 KiB: output-channel tiles would be
-// needed.
+// Not even one output row and one output channel fit in 4 KiB: the three
+// input rows of a row tile (3,072 bytes) and the constants of a channel
+// (1,176 bytes).
 
-func.func @too_big(%in: tensor<1x8x8x64xi8>, %w: tensor<64x3x3x64xi8>,
-                   %b: tensor<64xi32>, %rq: tensor<64x2xi32>)
-    -> tensor<1x8x8x64xi8> {
-  // ERR: does not fit in 4096 bytes of SRAM even with one output row per tile
+func.func @too_big(%in: tensor<1x8x8x128xi8>, %w: tensor<8x3x3x128xi8>,
+                   %b: tensor<8xi32>, %rq: tensor<8x2xi32>)
+    -> tensor<1x8x8x8xi8> {
+  // ERR: does not fit in 4096 bytes of SRAM even with one output row and one output channel per tile
   %0 = knpu.conv2d %in, %w, %b, %rq {stride = array<i64: 1, 1>,
       pad = array<i64: 1, 1, 1, 1>, input_zp = 0 : i64,
       output_zp = 0 : i64, clamp = array<i64: -128, 127>, round = "double"}
-      : (tensor<1x8x8x64xi8>, tensor<64x3x3x64xi8>, tensor<64xi32>,
-         tensor<64x2xi32>) -> tensor<1x8x8x64xi8>
-  return %0 : tensor<1x8x8x64xi8>
+      : (tensor<1x8x8x128xi8>, tensor<8x3x3x128xi8>, tensor<8xi32>,
+         tensor<8x2xi32>) -> tensor<1x8x8x8xi8>
+  return %0 : tensor<1x8x8x8xi8>
 }
 
 // BIG-LABEL: func.func @too_big
@@ -141,13 +142,14 @@ func.func @pool(%in: tensor<1x32x32x4xi8>) -> tensor<1x16x16x4xi8> {
 
 // -----
 
-// A fully connected layer (a 1x1 convolution with one output row) is not
-// split: its weights alone (8,192 bytes) exceed 4 KiB.
+// A fully connected layer (a 1x1 convolution with one output row) whose
+// input alone (4,096 bytes) fills 4 KiB cannot be split: its output-channel
+// tiles read the whole input.
 
 func.func @fc_too_big(%in: tensor<1x1x1x4096xi8>, %w: tensor<2x1x1x4096xi8>,
                       %b: tensor<2xi32>, %rq: tensor<2x2xi32>)
     -> tensor<1x1x1x2xi8> {
-  // ERR: does not fit in 4096 bytes of SRAM even with one output row per tile
+  // ERR: does not fit in 4096 bytes of SRAM even with one output row and one output channel per tile
   %0 = knpu.conv2d %in, %w, %b, %rq {stride = array<i64: 1, 1>,
       pad = array<i64: 0, 0, 0, 0>, input_zp = 0 : i64,
       output_zp = 0 : i64, clamp = array<i64: -128, 127>, round = "double"}
@@ -158,6 +160,102 @@ func.func @fc_too_big(%in: tensor<1x1x1x4096xi8>, %w: tensor<2x1x1x4096xi8>,
 
 // BIG-LABEL: func.func @fc_too_big
 // BIG-NOT: tensor.extract_slice
+
+// -----
+
+// Constants alone (4,992 bytes) exceed 4 KiB: output-channel tiles. They
+// read the whole input (1,024 bytes) with the layer's padding; with overlap
+// six channels fit (two buffers of 944 bytes of constants and of 384 bytes
+// of output), without overlap thirteen (2,040 and 832 bytes, one each).
+
+func.func @channels(%in: tensor<1x8x8x16xi8>, %w: tensor<32x3x3x16xi8>,
+                    %b: tensor<32xi32>, %rq: tensor<32x2xi32>)
+    -> tensor<1x8x8x32xi8> {
+  %0 = knpu.conv2d %in, %w, %b, %rq {stride = array<i64: 1, 1>,
+      pad = array<i64: 1, 1, 1, 1>, input_zp = 0 : i64,
+      output_zp = 0 : i64, clamp = array<i64: -128, 127>, round = "double"}
+      : (tensor<1x8x8x16xi8>, tensor<32x3x3x16xi8>, tensor<32xi32>,
+         tensor<32x2xi32>) -> tensor<1x8x8x32xi8>
+  return %0 : tensor<1x8x8x32xi8>
+}
+
+// BIG-LABEL: func.func @channels
+// BIG-NOT: tensor.extract_slice
+
+// SMALL-LABEL: func.func @channels
+// SMALL: %[[W0:.*]] = tensor.extract_slice %arg1[0, 0, 0, 0] [6, 3, 3, 16] [1, 1, 1, 1]
+// SMALL: %[[B0:.*]] = tensor.extract_slice %arg2[0] [6] [1]
+// SMALL: %[[Q0:.*]] = tensor.extract_slice %arg3[0, 0] [6, 2] [1, 1]
+// SMALL: tensor.extract_slice %arg1[6, 0, 0, 0] [6, 3, 3, 16]
+// SMALL: %[[W5:.*]] = tensor.extract_slice %arg1[30, 0, 0, 0] [2, 3, 3, 16]
+// SMALL: %[[E:.*]] = tensor.empty() : tensor<1x8x8x32xi8>
+// SMALL: %[[T0:.*]] = knpu.conv2d %arg0, %[[W0]], %[[B0]], %[[Q0]] {{{.*}}pad = array<i64: 1, 1, 1, 1>{{.*}}} : {{.*}} -> tensor<1x8x8x6xi8>
+// SMALL: %[[R0:.*]] = tensor.insert_slice %[[T0]] into %[[E]][0, 0, 0, 0] [1, 8, 8, 6] [1, 1, 1, 1]
+// SMALL: tensor.insert_slice {{.*}} into %[[R0]][0, 0, 0, 6] [1, 8, 8, 6]
+// SMALL: knpu.conv2d %arg0, %[[W5]], {{.*}} -> tensor<1x8x8x2xi8>
+// SMALL: %[[R5:.*]] = tensor.insert_slice {{.*}}[0, 0, 0, 30] [1, 8, 8, 2]
+// SMALL-NOT: knpu.conv2d
+// SMALL: return %[[R5]]
+
+// SERIAL-LABEL: func.func @channels
+// SERIAL: tensor.extract_slice %arg1[0, 0, 0, 0] [13, 3, 3, 16]
+// SERIAL: tensor.extract_slice %arg1[13, 0, 0, 0] [13, 3, 3, 16]
+// SERIAL: tensor.extract_slice %arg1[26, 0, 0, 0] [6, 3, 3, 16]
+// SERIAL: knpu.conv2d %arg0, {{.*}} -> tensor<1x8x8x13xi8>
+// SERIAL: knpu.conv2d %arg0, {{.*}} -> tensor<1x8x8x13xi8>
+// SERIAL: knpu.conv2d %arg0, {{.*}} -> tensor<1x8x8x6xi8>
+// SERIAL-NOT: knpu.conv2d
+// SERIAL: return
+
+// -----
+
+// The whole input (4,800 bytes) does not fit in 4 KiB, nor do one-row tiles
+// of all channels with overlap (two buffers of 1,600 input bytes beside 848
+// bytes of constants): output-channel tiles of two channels on one-row
+// tiles, two buffers of 1,600, 432 and 16 bytes, fill the 4 KiB. The two
+// tiles of a row read the same input slice. Without overlap one-row tiles
+// of all channels fit.
+
+func.func @rows_and_channels(%in: tensor<1x3x8x200xi8>,
+                             %w: tensor<4x1x1x200xi8>, %b: tensor<4xi32>,
+                             %rq: tensor<4x2xi32>) -> tensor<1x3x8x4xi8> {
+  %0 = knpu.conv2d %in, %w, %b, %rq {stride = array<i64: 1, 1>,
+      pad = array<i64: 0, 0, 0, 0>, input_zp = 0 : i64,
+      output_zp = 0 : i64, clamp = array<i64: -128, 127>, round = "double"}
+      : (tensor<1x3x8x200xi8>, tensor<4x1x1x200xi8>, tensor<4xi32>,
+         tensor<4x2xi32>) -> tensor<1x3x8x4xi8>
+  return %0 : tensor<1x3x8x4xi8>
+}
+
+// BIG-LABEL: func.func @rows_and_channels
+// BIG-NOT: tensor.extract_slice
+
+// SMALL-LABEL: func.func @rows_and_channels
+// SMALL: %[[W0:.*]] = tensor.extract_slice %arg1[0, 0, 0, 0] [2, 1, 1, 200]
+// SMALL: %[[W2:.*]] = tensor.extract_slice %arg1[2, 0, 0, 0] [2, 1, 1, 200]
+// SMALL: %[[E:.*]] = tensor.empty() : tensor<1x3x8x4xi8>
+// SMALL: %[[S0:.*]] = tensor.extract_slice %arg0[0, 0, 0, 0] [1, 1, 8, 200]
+// SMALL: knpu.conv2d %[[S0]], %[[W0]], {{.*}} -> tensor<1x1x8x2xi8>
+// SMALL: tensor.insert_slice {{.*}}[0, 0, 0, 0] [1, 1, 8, 2]
+// SMALL: knpu.conv2d %[[S0]], %[[W2]], {{.*}} -> tensor<1x1x8x2xi8>
+// SMALL: tensor.insert_slice {{.*}}[0, 0, 0, 2] [1, 1, 8, 2]
+// SMALL: %[[S1:.*]] = tensor.extract_slice %arg0[0, 1, 0, 0] [1, 1, 8, 200]
+// SMALL: knpu.conv2d %[[S1]], %[[W0]],
+// SMALL: knpu.conv2d %[[S1]], %[[W2]],
+// SMALL: %[[S2:.*]] = tensor.extract_slice %arg0[0, 2, 0, 0] [1, 1, 8, 200]
+// SMALL: knpu.conv2d %[[S2]], %[[W0]],
+// SMALL: knpu.conv2d %[[S2]], %[[W2]],
+// SMALL: tensor.insert_slice {{.*}}[0, 2, 0, 2] [1, 1, 8, 2]
+// SMALL-NOT: knpu.conv2d
+// SMALL: return
+
+// SERIAL-LABEL: func.func @rows_and_channels
+// SERIAL-NOT: tensor.extract_slice %arg1
+// SERIAL: knpu.conv2d {{.*}}, %arg1, %arg2, %arg3 {{.*}} -> tensor<1x1x8x4xi8>
+// SERIAL: knpu.conv2d {{.*}}, %arg1, %arg2, %arg3 {{.*}} -> tensor<1x1x8x4xi8>
+// SERIAL: knpu.conv2d {{.*}}, %arg1, %arg2, %arg3 {{.*}} -> tensor<1x1x8x4xi8>
+// SERIAL-NOT: knpu.conv2d
+// SERIAL: return
 
 // -----
 
