@@ -79,3 +79,40 @@ module attributes {knpu.sram_size = 65536 : i64} {
     return
   }
 }
+
+// CHECK-LABEL: func.func @graph_m3
+func.func @graph_m3(%a: tensor<1x4x4x2xi8>, %b: tensor<1x4x4x2xi8>)
+    -> tensor<1x4x4x2xi8> {
+  // CHECK: knpu.add %{{.*}}, %{{.*}} {clamp = array<i64: -128, 127>, input2_scale = array<i64: 1073741824, 0>, input2_zp = 6 : i64, input_scale = array<i64: 1359676495, -2>, input_zp = -128 : i64, output_scale = array<i64: 1127607261, -17>, output_zp = -128 : i64, round = "single"} : (tensor<1x4x4x2xi8>, tensor<1x4x4x2xi8>) -> tensor<1x4x4x2xi8>
+  %0 = knpu.add %a, %b {input_zp = -128 : i64, input2_zp = 6 : i64,
+      output_zp = -128 : i64, input_scale = array<i64: 1359676495, -2>,
+      input2_scale = array<i64: 1073741824, 0>,
+      output_scale = array<i64: 1127607261, -17>,
+      clamp = array<i64: -128, 127>, round = "single"}
+      : (tensor<1x4x4x2xi8>, tensor<1x4x4x2xi8>) -> tensor<1x4x4x2xi8>
+  return %0 : tensor<1x4x4x2xi8>
+}
+
+module attributes {knpu.sram_size = 65536 : i64} {
+  // CHECK-LABEL: func.func @elementwise
+  func.func @elementwise() {
+    // CHECK: knpu.elementwise {clamp = array<i64: 0, 127>, ifm = 0 : i64, ifm2 = 32 : i64, ifm2_scale = array<i64: 1073741824, 0>, ifm2_zp = 6 : i64, ifm_scale = array<i64: 1359676495, -2>, ifm_zp = -128 : i64, ofm = 64 : i64, ofm_scale = array<i64: 1127607261, -17>, ofm_zp = -128 : i64, round = "double", shape = array<i64: 4, 4, 2>}
+    knpu.elementwise {ifm = 0 : i64, ifm2 = 32 : i64, ofm = 64 : i64,
+                      shape = array<i64: 4, 4, 2>, ifm_zp = -128 : i64,
+                      ifm2_zp = 6 : i64, ofm_zp = -128 : i64,
+                      ifm_scale = array<i64: 1359676495, -2>,
+                      ifm2_scale = array<i64: 1073741824, 0>,
+                      ofm_scale = array<i64: 1127607261, -17>,
+                      clamp = array<i64: 0, 127>, round = "double"}
+    // In place: the OFM is the IFM2 exactly (docs/npu-spec.md 6.4)
+    // CHECK: knpu.elementwise {{{.*}}ifm2 = 32 : i64{{.*}}ofm = 32 : i64
+    knpu.elementwise {ifm = 0 : i64, ifm2 = 32 : i64, ofm = 32 : i64,
+                      shape = array<i64: 4, 4, 2>, ifm_zp = -128 : i64,
+                      ifm2_zp = 6 : i64, ofm_zp = -128 : i64,
+                      ifm_scale = array<i64: 1359676495, -2>,
+                      ifm2_scale = array<i64: 1073741824, 0>,
+                      ofm_scale = array<i64: 1127607261, -17>,
+                      clamp = array<i64: 0, 127>, round = "double"}
+    return
+  }
+}

@@ -67,6 +67,22 @@ static LogicalResult verifyQuant(Operation *op, int64_t inZp, int64_t outZp,
   return success();
 }
 
+/// The second input zero point and the three scales of an addition:
+/// (multiplier, shift) as SET_IFM_SCALE, SET_IFM2_SCALE and SET_OFM_SCALE
+/// take them (docs/npu-spec.md 6.1).
+static LogicalResult verifyAddScales(Operation *op, int64_t in2Zp,
+                                     ArrayRef<ArrayRef<int64_t>> scales) {
+  if (!isInt8(in2Zp))
+    return op->emitOpError("zero points must be in -128..127");
+  for (ArrayRef<int64_t> s : scales)
+    if (s.size() != 2 || s[0] < 0 || s[0] > 0x7FFFFFFF || s[1] < -31 ||
+        s[1] > 0)
+      return op->emitOpError("scales must be (multiplier, shift) with the "
+                             "multiplier in 0..2^31-1 and the shift in "
+                             "-31..0");
+  return success();
+}
+
 /// The shapes of a graph-level window operation: input and output must be
 /// static 1xHxWxC tensors.
 static LogicalResult verifyActivations(Operation *op, ShapedType in,
@@ -181,6 +197,25 @@ LogicalResult AvgPool2DOp::verify() {
   return verifyClamp(*this, getClamp());
 }
 
+LogicalResult AddOp::verify() {
+  auto in = getInput().getType();
+  auto out = getOutput().getType();
+  if (failed(verifyActivations(*this, in, out)))
+    return failure();
+  if (getInput2().getType() != in || out != in)
+    return emitOpError("inputs and output must have the same shape");
+  // Field widths of SET_IFM_SHAPE and SET_OFM_SHAPE (docs/npu-spec.md 6.1)
+  for (int64_t d : out.getShape().drop_front())
+    if (d < 1 || d > 0xFFFF)
+      return emitOpError("shape dimensions must be in 1..65535");
+  if (failed(verifyAddScales(*this, getInput2Zp(),
+                             {getInputScale(), getInput2Scale(),
+                              getOutputScale()})))
+    return failure();
+  return verifyQuant(*this, getInputZp(), getOutputZp(), getClamp(),
+                     getRound());
+}
+
 LogicalResult CpuOp::verify() {
   return verifyActivations(*this, getInput().getType(),
                            getOutput().getType());
@@ -260,6 +295,30 @@ LogicalResult PoolOp::verify() {
   int64_t ifm = getIfm(), ofm = getOfm();
   return verifyCommandRanges(*this, {{ifm, s.ih * s.iw * s.ic, "IFM"}},
                              {ofm, s.oh * s.ow * s.oc, "OFM"});
+}
+
+LogicalResult ElementwiseOp::verify() {
+  ArrayRef<int64_t> shape = getShape();
+  if (shape.size() != 3)
+    return emitOpError("shape needs 3 values");
+  for (int64_t d : shape)
+    if (d < 1 || d > 0xFFFF)
+      return emitOpError("shape dimensions must be in 1..65535");
+  if (failed(verifyAddScales(*this, getIfm2Zp(),
+                             {getIfmScale(), getIfm2Scale(), getOfmScale()})) ||
+      failed(verifyQuant(*this, getIfmZp(), getOfmZp(), getClamp(),
+                         getRound())))
+    return failure();
+  // An input at the OFM's offset is an in-place addition, which the NPU
+  // allows (docs/npu-spec.md 6.4); the OFM must not overlap the others
+  int64_t ifm = getIfm(), ifm2 = getIfm2(), ofm = getOfm();
+  int64_t n = shape[0] * shape[1] * shape[2];
+  SmallVector<Range, 2> reads;
+  if (ifm != ofm)
+    reads.push_back({ifm, n, "IFM"});
+  if (ifm2 != ofm)
+    reads.push_back({ifm2, n, "IFM2"});
+  return verifyCommandRanges(*this, reads, {ofm, n, "OFM"});
 }
 
 LogicalResult DmaWaitOp::verify() {

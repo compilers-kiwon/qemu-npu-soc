@@ -70,6 +70,37 @@ def Knpu_AvgPool2DOp : Knpu_Op<"avgpool", [Pure]> {
   let hasVerifier = 1;
 }
 
+def Knpu_AddOp : Knpu_Op<"add", [Pure]> {
+  let summary = "int8 addition with input scaling";
+  let description = [{
+    `AddFunc` of TFLite Micro (docs/npu-spec.md 8.3): two inputs and an
+    output of the same 1xHxWxC shape (no broadcasting). Each input minus its
+    zero point is shifted left by 20 and rescaled by its scale; their sum is
+    rescaled by `output_scale` and the output zero point is added.
+
+    `input_scale`, `input2_scale` and `output_scale` are (multiplier,
+    shift) with a shift of at most 0 (docs/npu-spec.md 6.1); `clamp` and
+    `round` are as in `knpu.conv2d`.
+  }];
+  let arguments = (ins
+    TensorRankOf<[I8], [4]>:$input,
+    TensorRankOf<[I8], [4]>:$input2,
+    I64Attr:$input_zp,
+    I64Attr:$input2_zp,
+    I64Attr:$output_zp,
+    DenseI64ArrayAttr:$input_scale,
+    DenseI64ArrayAttr:$input2_scale,
+    DenseI64ArrayAttr:$output_scale,
+    DenseI64ArrayAttr:$clamp,
+    StrAttr:$round
+  );
+  let results = (outs TensorRankOf<[I8], [4]>:$output);
+  let assemblyFormat = [{
+    $input `,` $input2 attr-dict `:` functional-type(operands, results)
+  }];
+  let hasVerifier = 1;
+}
+
 def Knpu_CpuOp : Knpu_Op<"cpu"> {
   let summary = "A layer that runs on the CPU after the NPU job";
   let description = [{
@@ -161,6 +192,33 @@ def Knpu_PoolOp : Knpu_Op<"pool"> {
     DenseI64ArrayAttr:$stride,
     DenseI64ArrayAttr:$pad,
     DenseI64ArrayAttr:$clamp
+  );
+  let assemblyFormat = "attr-dict";
+  let hasVerifier = 1;
+}
+
+def Knpu_ElementwiseOp : Knpu_Op<"elementwise"> {
+  let summary = "OP_ADD with its SET state";
+  let description = [{
+    The elementwise operation of the NPU, OP_ADD (docs/npu-spec.md 8.3).
+    `ifm`, `ifm2` and `ofm` are the SRAM offsets of three tensors of `shape`
+    (H, W, C); the other attributes are as in `knpu.add`. The OFM may be one
+    of the inputs exactly (an in-place addition) but must not overlap them
+    otherwise (docs/npu-spec.md 6.4).
+  }];
+  let arguments = (ins
+    I64Attr:$ifm,
+    I64Attr:$ifm2,
+    I64Attr:$ofm,
+    DenseI64ArrayAttr:$shape,
+    I64Attr:$ifm_zp,
+    I64Attr:$ifm2_zp,
+    I64Attr:$ofm_zp,
+    DenseI64ArrayAttr:$ifm_scale,
+    DenseI64ArrayAttr:$ifm2_scale,
+    DenseI64ArrayAttr:$ofm_scale,
+    DenseI64ArrayAttr:$clamp,
+    StrAttr:$round
   );
   let assemblyFormat = "attr-dict";
   let hasVerifier = 1;

@@ -183,6 +183,90 @@ func.func @pool_overlap() {
 
 // -----
 
+func.func @add_shapes(%a: tensor<1x4x4x2xi8>, %b: tensor<1x4x4x3xi8>) {
+  // expected-error @+1 {{inputs and output must have the same shape}}
+  %0 = knpu.add %a, %b {input_zp = 0 : i64, input2_zp = 0 : i64,
+      output_zp = 0 : i64, input_scale = array<i64: 1073741824, 0>,
+      input2_scale = array<i64: 1073741824, 0>,
+      output_scale = array<i64: 1073741824, -18>,
+      clamp = array<i64: -128, 127>, round = "double"}
+      : (tensor<1x4x4x2xi8>, tensor<1x4x4x3xi8>) -> tensor<1x4x4x2xi8>
+  return
+}
+
+// -----
+
+func.func @add_zero_point(%a: tensor<1x4x4x2xi8>) {
+  // expected-error @+1 {{zero points must be in -128..127}}
+  %0 = knpu.add %a, %a {input_zp = 0 : i64, input2_zp = 128 : i64,
+      output_zp = 0 : i64, input_scale = array<i64: 1073741824, 0>,
+      input2_scale = array<i64: 1073741824, 0>,
+      output_scale = array<i64: 1073741824, -18>,
+      clamp = array<i64: -128, 127>, round = "double"}
+      : (tensor<1x4x4x2xi8>, tensor<1x4x4x2xi8>) -> tensor<1x4x4x2xi8>
+  return
+}
+
+// -----
+
+func.func @add_shift(%a: tensor<1x4x4x2xi8>) {
+  // expected-error @+1 {{scales must be (multiplier, shift) with the multiplier in 0..2^31-1 and the shift in -31..0}}
+  %0 = knpu.add %a, %a {input_zp = 0 : i64, input2_zp = 0 : i64,
+      output_zp = 0 : i64, input_scale = array<i64: 1073741824, 0>,
+      input2_scale = array<i64: 1073741824, 0>,
+      output_scale = array<i64: 1073741824, 1>,
+      clamp = array<i64: -128, 127>, round = "double"}
+      : (tensor<1x4x4x2xi8>, tensor<1x4x4x2xi8>) -> tensor<1x4x4x2xi8>
+  return
+}
+
+// -----
+
+module attributes {knpu.sram_size = 4096 : i64} {
+  func.func @elementwise_outside_sram() {
+    // expected-error @+1 {{IFM2 [4080, 4112) is outside the 4096-byte SRAM}}
+    knpu.elementwise {ifm = 0 : i64, ifm2 = 4080 : i64, ofm = 64 : i64,
+                      shape = array<i64: 4, 4, 2>, ifm_zp = 0 : i64,
+                      ifm2_zp = 0 : i64, ofm_zp = 0 : i64,
+                      ifm_scale = array<i64: 1073741824, 0>,
+                      ifm2_scale = array<i64: 1073741824, 0>,
+                      ofm_scale = array<i64: 1073741824, -18>,
+                      clamp = array<i64: -128, 127>, round = "double"}
+    return
+  }
+}
+
+// -----
+
+// The OFM may be an input exactly (in place), but not overlap one partly.
+func.func @elementwise_overlap() {
+  // expected-error @+1 {{OFM overlaps the IFM2}}
+  knpu.elementwise {ifm = 0 : i64, ifm2 = 32 : i64, ofm = 48 : i64,
+                    shape = array<i64: 4, 4, 2>, ifm_zp = 0 : i64,
+                    ifm2_zp = 0 : i64, ofm_zp = 0 : i64,
+                    ifm_scale = array<i64: 1073741824, 0>,
+                    ifm2_scale = array<i64: 1073741824, 0>,
+                    ofm_scale = array<i64: 1073741824, -18>,
+                    clamp = array<i64: -128, 127>, round = "double"}
+  return
+}
+
+// -----
+
+func.func @elementwise_shape() {
+  // expected-error @+1 {{shape dimensions must be in 1..65535}}
+  knpu.elementwise {ifm = 0 : i64, ifm2 = 32 : i64, ofm = 64 : i64,
+                    shape = array<i64: 4, 0, 2>, ifm_zp = 0 : i64,
+                    ifm2_zp = 0 : i64, ofm_zp = 0 : i64,
+                    ifm_scale = array<i64: 1073741824, 0>,
+                    ifm2_scale = array<i64: 1073741824, 0>,
+                    ofm_scale = array<i64: 1073741824, -18>,
+                    clamp = array<i64: -128, 127>, round = "double"}
+  return
+}
+
+// -----
+
 // expected-error @+1 {{kind must be "copy_in", "call" or "copy_out"}}
 knpu.cpu_step "jump" @f
 
