@@ -36,7 +36,7 @@ TEST_ARGS = --images '$(O)/images' --host-bin '$(O)/host/bin' \
 # run their own jobs in parallel.
 .NOTPARALLEL:
 
-.PHONY: all defconfig run test test-boot test-v1 test-v5 test-v6 check \
+.PHONY: all defconfig run demo test test-boot test-v1 test-v5 test-v6 check \
         check-npu-core compiler check-compiler update-vectors \
         check-runtime check-style check-licenses help FORCE
 
@@ -53,6 +53,11 @@ defconfig:
 
 run:
 	'$(O)/images/start-qemu.sh'
+
+# Boots the image unattended and runs the ResNet-8 on the ten photographs
+# (docs/design.md 10)
+demo:
+	@python3 tests/e2e/kn1_demo.py $(TEST_ARGS)
 
 # A Buildroot target: make br-linux-rebuild, make br-menuconfig, ...
 br-%: FORCE
@@ -137,6 +142,7 @@ help:
 	@echo '  make                 build the full image'
 	@echo '  make defconfig       load kn1_evb_defconfig again'
 	@echo '  make run             boot the image in QEMU'
+	@echo '  make demo            boot it unattended and classify the ten photographs'
 	@echo '  make br-<target>     a Buildroot target, e.g. br-linux-rebuild'
 	@echo 'Tests on the image:'
 	@echo '  make test            test-boot, test-v1, test-v5 and test-v6'

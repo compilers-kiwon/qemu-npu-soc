@@ -12,6 +12,40 @@ MLIR로 컴파일해 이 NPU에서 돌리고, 결과를 TFLite Micro 참조 구�
 - 설계: [docs/design.md](docs/design.md)
 - 구현 순서: [docs/plan.md](docs/plan.md)
 
+## 결과
+
+- MLPerf Tiny의 이미지 분류 모델 ResNet-8(CIFAR-10, int8)이 kn1-evb에서
+  TensorFlow Lite Micro와 비트 단위로 같은 출력을 낸다. 합성곱, 덧셈, 평균
+  풀링, FC는 NPU가, softmax는 모델 파일에 든 aarch64 코드로 CPU가 돌린다. 두
+  반올림 방식과 SRAM 64 KiB·32 KiB용 모델 모두 시험 입력 열다섯에서 같다(V6).
+- int8 모델의 CIFAR-10 시험 집합 10,000장 정확도는 87.63%다(TFLite
+  인터프리터로 잰 값이고, float 모델은 88.02%).
+- CIFAR-10 클래스마다 한 장씩 고른 Wikimedia Commons 사진 열 장 가운데 일곱
+  장이 제 클래스로 분류된다. `make demo`가 보드에서 이 분류를 보여 준다(아래
+  데모 절).
+- 컴파일러가 추정한 한 장의 NPU 사이클은 SRAM 128, 64, 32 KiB에서 138,192,
+  153,108, 155,251이다. 가정값은 실제 칩의 값이 아니라 스케줄을 비교하려는
+  값이다(아래 ResNet-8 절의 표).
+
+## 빠른 시작
+
+아래 요구 사항 절의 호스트 패키지를 설치한 뒤 다음처럼 이미지를 빌드하고
+데모와 이미지 시험을 돌린다.
+
+```bash
+git clone --recurse-submodules https://github.com/compilers-kiwon/qemu-npu-soc.git
+cd qemu-npu-soc
+make
+make demo
+make test
+```
+
+`make`는 Buildroot로 툴체인부터 TF-A, U-Boot, 리눅스, `knpu` 드라이버, 런타임,
+시험 모델, QEMU까지 이미지 전체를 빌드한다(아래 빌드 절). `make demo`는 그
+이미지를 사람 손 없이 부팅해 ResNet-8로 사진 열 장을 분류하고(아래 데모 절),
+`make test`는 부팅 시험, V1, V5, V6을 돌린다. 호스트 시험 `make check`에는
+아래 NPU 공유 코어 시험 절과 모델 컴파일러 절의 패키지가 더 필요하다.
+
 ## 구성
 
 설계 12.1절의 구성이다.
@@ -29,7 +63,7 @@ MLIR로 컴파일해 이 NPU에서 돌리고, 결과를 TFLite Micro 참조 구�
 | `br2-external/` | Buildroot 외부 트리(defconfig, 커널 설정, 패키지, 패치) |
 | `buildroot/` | Buildroot 서브모듈(고정) |
 | `models/` | `.tflite` 모델과 만드는 스크립트, 컴파일한 시험 벡터 |
-| `tests/` | 장치, 드라이버, 컴파일러, 끝-끝 시험 |
+| `tests/` | 장치, 드라이버, 컴파일러, 끝-끝 시험, 데모, 형식·라이선스 검사 |
 
 ## 고정 버전
 
@@ -60,8 +94,9 @@ unzip, rsync, file, bc, findutils, awk, wget. Debian 계열에서는
 sudo apt-get install build-essential bc bzip2 cpio file git patch perl rsync unzip wget
 ```
 
-`buildroot/utils/check-package`를 돌리려면 `python3-magic`과 `python3-flake8`도 필요하다.
-컴파일러 시험(`make check-compiler`)은 venv를 만들므로 `python3-venv`도 필요하다.
+`buildroot/utils/check-package`를 돌리려면 `python3-magic`과
+`python3-flake8`도 필요하다. 컴파일러 시험(`make check-compiler`)과 라이선스
+검사(`make check-licenses`)는 venv를 만드므로 `python3-venv`도 필요하다.
 
 ## 빌드
 
@@ -115,6 +150,16 @@ TF-A 포트(`firmware/tf-a/`)나 U-Boot 보드 포트(`firmware/u-boot/`)를 고
 `make br-linux-rebuild`, `make br-menuconfig`).
 U-Boot는 FIP 안에 들어가므로, U-Boot를 고쳤을 때도 TF-A를 다시 빌드한다.
 
+QEMU 장치(`hw/qemu/`)나 공유 코어(`hw/npu-core/`)를 고친 뒤에도 마찬가지다.
+`qemu-kn1` 패키지는 이 파일들을 QEMU 소스 트리로 복사해 빌드하므로, `make`나
+`make br-host-qemu-kn1-rebuild`로는 QEMU가 바뀌지 않는다.
+`make br-host-qemu-kn1-dirclean`을 먼저 돌리고 `make`를 부른다.
+
+```bash
+make br-host-qemu-kn1-dirclean
+make
+```
+
 WSL은 `PATH`에 공백이 든 Windows 경로를 붙이는데, Buildroot는 그런 `PATH`를
 거부한다. `Makefile`은 Buildroot를 부를 때 그 항목들을 뺀다.
 
@@ -126,6 +171,65 @@ dt-schema(pip `dtschema`), yamllint, flex, bison이 있으면, 다음 스크립�
 
 ```bash
 tests/dt/check-dt.sh buildroot/dl/linux/linux-7.3.1.tar.xz
+```
+
+업스트림 트리에 들어가는 코드(QEMU, 리눅스, U-Boot, TF-A)는 그 업스트림의
+`checkpatch.pl`과 설정으로 검사한다. `make check-style`은 빌드가 받는 소스
+tarball 넷을 확인하거나 받은 뒤(`BR2_DL_DIR`을 따른다)
+`tests/style/checkpatch.sh`를 부른다. 오류, 경고, CHECK가 하나라도 나오면
+실패하고, 허용한 경고는 이유와 함께 스크립트에 적었다.
+
+```bash
+make check-style
+```
+
+## 데모
+
+`make demo`는 빌드한 이미지를 사람 손 없이 부팅해 `knpu` 모듈을 올리고, 64 KiB
+SRAM용으로 컴파일한 ResNet-8 모델(반올림 double)로 사진 열 장을 `knpu-infer`로
+분류한 뒤 끈다(설계 10절). 사진마다 top1의 클래스와, 출력이 TensorFlow Lite
+Micro의 정답값과 같은지를 찍는다. 출력이 하나라도 다르면 실패한다. 콘솔 로그는
+`output/test-logs/`의 `demo-uart0.log`(U-Boot와 리눅스)와
+`demo-uart1.log`(TF-A)에 남는다.
+
+```bash
+make demo
+```
+
+출력은 다음과 같다.
+
+```
+boot: kn1-evb in QEMU through TF-A, U-Boot and Linux
+PASS: boot: U-Boot boots Linux through extlinux
+PASS: boot: logged in on UART0
+modprobe knpu: /dev/accel/accel0
+resnet8-double-64k.knpu (64 KiB SRAM, double rounding)
+  photo       top1        output
+  airplane    airplane    equals TFLite Micro
+  automobile  automobile  equals TFLite Micro
+  bird        bird        equals TFLite Micro
+  cat         cat         equals TFLite Micro
+  deer        bird        equals TFLite Micro
+  dog         dog         equals TFLite Micro
+  frog        cat         equals TFLite Micro
+  horse       deer        equals TFLite Micro
+  ship        ship        equals TFLite Micro
+  truck       truck       equals TFLite Micro
+7 of 10 photographs classified as their class
+10 of 10 outputs equal TFLite Micro
+poweroff: QEMU exited with status 0
+Console logs are in output/test-logs/
+```
+
+손으로 돌리려면 `make run`으로 부팅해 `root`로 로그인한 뒤 모듈을 올리고
+`knpu-infer`를 부른다. `top1=`은 CIFAR-10의 클래스 번호다(0 airplane,
+1 automobile, 2 bird, 3 cat, 4 deer, 5 dog, 6 frog, 7 horse, 8 ship, 9 truck).
+배 사진의 출력은 아래 ResNet-8 절에 있다.
+
+```
+# modprobe knpu
+# cd /usr/share/knpu/resnet8
+# knpu-infer resnet8-double-64k.knpu photo-ship.bin --expect expected-double-photo-ship.bin
 ```
 
 ## NPU 공유 코어 시험
@@ -174,11 +278,14 @@ make test-v1
 닿는 크기보다 작지 않은지 본다. 보드 DT가 NPU 전용 CMA 풀을 4 GiB 위에
 두므로 NPU 버퍼의 주소는 모두 64비트다.
 
-V5는 펌웨어 체인으로 부팅한 게스트에서 돈다. `knpu` 모듈을 올려 시험
-프로그램 `knpu-test`(`tests/driver/knpu_test.c`)를 돌리고, 모듈을 내렸다가
-다시 올려 한 번 더 돌린다. ioctl, 검증기와 제출 검사의 부정 시험, 4 GiB 위의
-버퍼, 장치 오류와 타임아웃 뒤의 복구(debugfs `inject_hang`), 성능 카운터,
-runtime PM을 확인한다.
+V5는 펌웨어 체인으로 부팅한 게스트에서 돈다. `knpu` 모듈을 올려 시험 프로그램
+`knpu-test`(`tests/driver/knpu_test.c`)를 돌리고, 모듈을 내렸다가 다시 올려 한
+번 더 돌린다. ioctl, 검증기와 제출 검사의 부정 시험, 4 GiB 위의 버퍼, 출력
+버퍼의 쓰기 펜스(dma-buf), 장치 오류와 타임아웃 뒤의 복구(debugfs
+`inject_hang`), 성능 카운터, runtime PM을 확인한다. 부정 시험은 errno와 함께,
+드라이버가 디버그 메시지(`drm.debug`)로 남긴 거부 이유를 규칙과 명령
+오프셋까지 확인한다. 합성곱 명령열을 고정 시드로 무작위로 바꾼 1,000개는 시험
+프로그램 안의 참조 검사기와 판정과 메시지를 비교한다.
 
 ```bash
 make test-v5
@@ -472,6 +579,14 @@ layer11의 상수는 SRAM 배치가 들어가도록 미리 읽기를 거둔 것�
 작을수록 타일로 나뉘는 층이 늘고 그 층이 쓰거나 읽는 활성값이 arena를
 거치므로, DMA 바이트와 추정 사이클이 128 KiB, 64 KiB, 32 KiB 순으로 는다.
 
+SRAM 배치가 들어가지 않을 때 활성값을 SRAM에 남기거나 상수를 미리 읽는 선택을
+거두는 규칙은 둘이다. `cost`는 거두면 DMA로 더 옮길 바이트가 가장 적은 것부터,
+`largest`(M3.6 이전 규칙)는 가장 큰 것부터 거둔다. `knpu-compile`은 두
+규칙으로 각각 스케줄해 추정 사이클이 작은 쪽을 쓴다(같으면 `cost`, 설계
+9.4절). 표의 세 크기에서는 `cost`를 쓰고, 8 KiB와 16 KiB에서는 `largest`를
+고른다. `--placement=cost`나 `--placement=largest`는 한 규칙으로 고정하고,
+`--report`는 다른 규칙의 총 추정 사이클도 찍는다.
+
 층별 보고는 MNIST CNN 절과 같은 순서로 컴파일하고, `--sram-size`와
 `--overlap=false`로 표의 경우를 고른다.
 
@@ -486,11 +601,12 @@ build/compiler/bin/knpu-compile --sram-size=32768 --report resnet8.mlir -o resne
 
 ## CI
 
-GitHub Actions에서는 push마다 defconfig, `check-package`, `reuse lint`,
-NPU 공유 코어 시험(V2, V3), 모델 컴파일러 시험(V2~V4), 런타임 호스트 시험,
-바인딩과 디바이스 트리의 스키마 검사를 돌리고(`ci.yml`), 매일 밤과 수동 실행
-때 전체 빌드, `kn1_defconfig` 형태 검사, 부팅 시험, V1, V5, V6을
-돌린다(`nightly.yml`). 두 워크플로는 위의 `make` 대상을 부른다.
+GitHub Actions에서는 push마다 defconfig, `check-package`, NPU 공유 코어
+시험(V2, V3), 모델 컴파일러 시험(V2~V4), 런타임 호스트 시험, 바인딩과 디바이스
+트리의 스키마 검사, 업스트림 형식 검사(`make check-style`), 라이선스
+검사(`make check-licenses`)를 돌리고(`ci.yml`), 매일 밤과 수동 실행 때 전체
+빌드, `kn1_defconfig` 형태 검사, 부팅 시험, V1, V5, V6, Buildroot `legal-info`
+검사를 돌린다(`nightly.yml`). 두 워크플로는 위의 `make` 대상을 부른다.
 
 ## 현재 상태
 
@@ -499,7 +615,7 @@ NPU 공유 코어 시험(V2, V3), 모델 컴파일러 시험(V2~V4), 런타임 �
 | M1 | 합성곱 하나를 모든 층에 관통시킨다 | 끝났다. M1.1 저장소 뼈대, M1.2 펌웨어 체인 부팅(QEMU 머신, 디바이스 트리, TF-A, U-Boot, 리눅스 셸), M1.3 NPU 명세 v0([docs/npu-spec.md](docs/npu-spec.md)), M1.4 NPU 공유 코어와 정답값 비교(V2, V3), M1.5 QEMU NPU 장치(V1), M1.6 `knpu` 드라이버(V5), M1.7 모델 컴파일러 최소 경로(V2~V4), M1.8 런타임과 끝-끝 시험(V6) |
 | M2 | MNIST CNN | 끝났다. M2.1 MNIST 모델과 정답값(V2), M2.2 공유 코어의 `OP_AVGPOOL`(V1~V3), M2.3 생성기의 새 연산과 softmax(V2), M2.4 컴파일러 NPU 경로와 사이클 추정(V3, V4), M2.5 컴파일러 CPU 경로와 lcc-opt(V3, V4), M2.6 런타임의 CPU 단계와 top-1, M2.7 커널 설정 `kn1_defconfig`, M2.8 끝-끝 시험(V6)과 사이클 추정 보고 |
 | M3 | MLPerf Tiny ResNet-8 | 끝났다. M3.1 ResNet-8 모델과 정답값(V2), M3.2 공유 코어의 `OP_ADD`(V1~V3), M3.3 생성기의 ADD와 잔차 연결(V2), M3.4 컴파일러의 ADD와 두 입력 층(V3, V4), M3.5 컴파일러의 출력 채널 타일과 2-D DMA(V3, V4), M3.6 SRAM 배치 개선과 SRAM 크기 시연(V3, V4), M3.7 끝-끝 시험(V6) |
-| M4 | 마무리: 새로 받은 저장소에서 README만으로 빌드와 데모 | 진행 중. 남은 단계: M4.1 SRAM 배치 규칙 선택(V3, V4), M4.2 검증기 부정 시험(V5), M4.3 업스트림 형식 검사, M4.4 라이선스 점검, M4.5 README와 새 저장소 확인 |
+| M4 | 마무리: 새로 받은 저장소에서 README만으로 빌드와 데모 | 끝났다. M4.1 SRAM 배치 규칙 선택(V3, V4), M4.2 검증기 부정 시험(V5), M4.3 업스트림 형식 검사, M4.4 라이선스 점검, M4.5 README와 새 저장소 확인 |
 
 ## 라이선스
 
@@ -519,8 +635,24 @@ Apache-2.0 WITH LLVM-exception이다(설계 D18, 12.4절).
 | `br2-external/` | GPL-2.0-or-later. 패치는 대상 프로젝트를 따른다 |
 | 그 밖의 모든 것 | Apache-2.0 WITH LLVM-exception |
 
-모든 파일에 SPDX 식별자를 두고, 전문은 `LICENSES/`에 둔다. 머리글을 둘 수
-없는 파일은 `REUSE.toml`에 선언한다. 저장소는 [REUSE](https://reuse.software)
-규격 3.3을 따르고, CI가 `reuse lint`로 검사한다. 라이선스 전문은 해당
-라이선스를 쓰는 코드가 생길 때 추가한다. 빌드할 때 내려받는 lcc는 저장소에
-넣지 않으며 lcc의 라이선스(`CPYRIGHT`)를 따른다(설계 12.4절).
+외부에서 가져온 데이터는 원래 라이선스를 유지한다. MNIST에서 온
+것(`models/mnist/digits/`의 숫자 이미지, MNIST로 학습한 `mnist.tflite`, 그
+모델을 컴파일한 모델 파일과 정답값)은 CC-BY-SA-3.0이고, ResNet-8의 분류를
+보이는 사진(`models/resnet8/photos/`)은 Wikimedia Commons의 CC0-1.0이다(설계
+12.4절).
+
+모든 파일에 SPDX 식별자를 두고, 전문은 `LICENSES/`에 둔다. 머리글을 둘 수 없는
+파일은 `REUSE.toml`에 선언한다. 저장소는 [REUSE](https://reuse.software) 규격
+3.3을 따른다. 라이선스 전문은 해당 라이선스를 쓰는 코드가 생길 때 추가한다.
+빌드할 때 내려받는 lcc는 저장소에 넣지 않으며 lcc의 라이선스(`CPYRIGHT`)를
+따른다(설계 12.4절).
+
+`make check-licenses`는 `build/reuse-venv`에 PyPI `reuse` 6.3.0을 받아
+`reuse lint`를 돌리고, 그 보고서로 파일마다의 라이선스가 위 표와 예외에 맞는지
+본다. push CI가 이 대상을 부르고, 야간 CI는 전체 빌드 뒤 Buildroot
+`legal-info`가 `br2-external/`의 패키지를 모두 매니페스트에 담고, Buildroot
+자체 소스를 저장하지 않았다는 것 밖의 경고를 내지 않는지 본다.
+
+```bash
+make check-licenses
+```
