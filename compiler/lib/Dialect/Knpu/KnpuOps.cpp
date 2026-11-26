@@ -12,8 +12,20 @@
 using namespace mlir;
 using namespace mlir::knpu;
 
+// GCC 13 warns that the generated properties hash of an op without
+// attributes (StopOp) passes an uninitialized buffer to xxh3_64bits
+// through LLVM 23's hash_combine() with no arguments. The length is then 0
+// and nothing is read (llvm/ADT/Hashing.h), so the warning is turned off
+// for the generated code only.
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
+#endif
 #define GET_OP_CLASSES
 #include "knpu/Dialect/Knpu/KnpuOps.cpp.inc"
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
 
 //===----------------------------------------------------------------------===//
 // Helpers
