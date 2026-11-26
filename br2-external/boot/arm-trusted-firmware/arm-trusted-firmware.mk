@@ -21,3 +21,12 @@ define ARM_TRUSTED_FIRMWARE_KN1_COPY_PLAT
 	cp -r $(ARM_TRUSTED_FIRMWARE_KN1_PLAT_DIR) $(@D)/plat/kiwon/kn1
 endef
 ARM_TRUSTED_FIRMWARE_POST_PATCH_HOOKS += ARM_TRUSTED_FIRMWARE_KN1_COPY_PLAT
+
+# legal-info saves the tarball but not the port copied in above; it goes
+# next to it, at its path in the TF-A tree (docs/design.md 12.4)
+define ARM_TRUSTED_FIRMWARE_KN1_SAVE_PLAT
+	mkdir -p $(ARM_TRUSTED_FIRMWARE_REDIST_SOURCES_DIR)/plat/kiwon
+	cp -r $(ARM_TRUSTED_FIRMWARE_KN1_PLAT_DIR) \
+		$(ARM_TRUSTED_FIRMWARE_REDIST_SOURCES_DIR)/plat/kiwon/kn1
+endef
+ARM_TRUSTED_FIRMWARE_POST_LEGAL_INFO_HOOKS += ARM_TRUSTED_FIRMWARE_KN1_SAVE_PLAT

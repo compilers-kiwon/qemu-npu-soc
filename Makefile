@@ -14,6 +14,9 @@ BUILD_DIR := $(CURDIR)/build
 PY_VENV := $(BUILD_DIR)/py-venv
 FLATBUFFERS_VERSION := 25.9.23
 PY_STAMP := $(PY_VENV)/.flatbuffers-$(FLATBUFFERS_VERSION)
+REUSE_VENV := $(BUILD_DIR)/reuse-venv
+REUSE_VERSION := 6.3.0
+REUSE_STAMP := $(REUSE_VENV)/.reuse-$(REUSE_VERSION)
 
 # Buildroot stops when PATH has spaces (buildroot/support/dependencies/
 # dependencies.sh), and WSL adds Windows directories that have them, so
@@ -35,7 +38,7 @@ TEST_ARGS = --images '$(O)/images' --host-bin '$(O)/host/bin' \
 
 .PHONY: all defconfig run test test-boot test-v1 test-v5 test-v6 check \
         check-npu-core compiler check-compiler update-vectors \
-        check-runtime check-style help FORCE
+        check-runtime check-style check-licenses help FORCE
 
 # The full image in $(O)/images
 all: $(O)/.config
@@ -115,6 +118,20 @@ check-style: $(O)/.config
 	           arm-trusted-firmware-source
 	tests/style/checkpatch.sh '$(BR_DL_DIR)'
 
+# The REUSE tool, in a venv of its own
+$(REUSE_STAMP):
+	rm -rf '$(REUSE_VENV)'
+	python3 -m venv '$(REUSE_VENV)'
+	'$(REUSE_VENV)/bin/pip' install --quiet reuse==$(REUSE_VERSION)
+	touch '$@'
+
+# REUSE compliance, then the license of every file against the table of
+# docs/design.md 12.4
+check-licenses: $(REUSE_STAMP)
+	'$(REUSE_VENV)/bin/reuse' lint
+	'$(REUSE_VENV)/bin/reuse' lint --json > '$(BUILD_DIR)/reuse-lint.json'
+	python3 tests/license/check-licenses.py '$(BUILD_DIR)/reuse-lint.json'
+
 help:
 	@echo 'Image (Buildroot, in $(O)):'
 	@echo '  make                 build the full image'
@@ -129,4 +146,5 @@ help:
 	@echo '  make update-vectors  write models/*/vectors/ again'
 	@echo 'Source checks:'
 	@echo '  make check-style     upstream style checks (checkpatch.pl)'
+	@echo '  make check-licenses  reuse lint and the license of each file'
 	@echo 'Variables: O=<Buildroot output directory>, MLIR_DIR=<MLIR CMake package>'

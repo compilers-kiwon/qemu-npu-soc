@@ -1,0 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Kiwon Kwon
+# SPDX-License-Identifier: GPL-2.0-or-later
+# License files, locally computed from LICENSES/ of this repository
+sha256  aaf135472f81c5b4a0dca9367e5bb5e9750032b5bebe5442b36e4c0a47430df3  LICENSES/GPL-2.0-only.txt
+sha256  b05785f9f18e6716bab63424b11454513b9943a222595b70411009202fc592b5  LICENSES/MIT.txt

@@ -652,19 +652,29 @@ M3.6에서 찾은 SRAM 배치 문제를 고치고, 드라이버 검증기의 부
 
 ### M4.4 라이선스 점검 (CI)
 
-- `knpu`, `knpu-tests`, `knpu-runtime`, `knpu-models` 패키지: rsync 뒤 훅으로
-  쓰는 라이선스 전문을 빌드 디렉터리에 복사하고 `_LICENSE_FILES`로
-  가리킨다(설계 12.4절).
-- 야간 CI: 전체 빌드 뒤 `legal-info`를 돌려 이 저장소의 패키지에 경고가 있으면
-  실패한다.
-- `tests/license/check-licenses.py`: 파일마다의 SPDX 라이선스(머리글과
-  `REUSE.toml`)를 설계 12.4절의 경로별 표와 대조한다. 표에 적은 예외(MNIST
-  데이터는 CC-BY-SA-3.0, 사진은 CC0-1.0)만 받는다. `make check-licenses`와
-  push CI의 reuse-lint 작업이 부른다.
+- `knpu`, `knpu-tests`, `knpu-runtime`, `knpu-models` 패키지: `legal-info`가
+  버전이 없는 패키지를 건너뛰므로 `_VERSION`을 `custom`으로 둔다. rsync 뒤
+  훅으로 쓰는 라이선스 전문을 빌드 디렉터리에 복사하고 `_LICENSE_FILES`로
+  가리키며, 그 해시를 패키지의 `.hash`에 둔다(설계 12.4절). 리눅스와 TF-A의
+  버전 고정 해시 파일에도 라이선스 파일의 해시를 더한다.
+- 훅이 복사해 넣는 파일(U-Boot 보드와 defconfig, TF-A 플랫폼, QEMU의 kn1
+  소스와 공유 코어, `knpu_cmd.h`)은 `legal-info`가 저장하지 않으므로,
+  legal-info 뒤 훅이 저장된 소스 옆에 둔다.
+- 야간 CI: 전체 빌드 뒤 `legal-info`를 돌려, Buildroot 자체 소스를 저장하지
+  않았다는 것 밖의 경고나 오류가 나거나 `br2-external/`의 패키지가
+  매니페스트에 없으면 실패한다. 예약 시각을 정각에서 옮긴다(GitHub는 정각의
+  예약 실행을 늦출 수 있다).
+- `tests/license/check-licenses.py`: `reuse lint --json` 보고서에서 파일마다의
+  SPDX 라이선스(머리글과 `REUSE.toml`)를 읽어 설계 12.4절의 경로별 표와
+  대조한다. 표에 적은 예외(MNIST 데이터는 CC-BY-SA-3.0, 사진은 CC0-1.0)만
+  받는다. `make check-licenses`(build/의 venv에 reuse 6.3.0을 설치하고
+  `reuse lint`에 이어 표 검사)와 push CI의 reuse-lint 작업이 부른다.
 
 완료 조건:
 
-- `legal-info`가 이 저장소의 패키지에 경고를 내지 않는다.
+- 전체 빌드 뒤 `legal-info`가 `br2-external/`의 패키지를 모두 매니페스트에
+  담고 라이선스 전문과 복사해 넣은 파일을 저장하며, Buildroot 자체 소스를
+  저장하지 않았다는 것 밖의 경고를 내지 않는다(로컬과 야간 CI).
 - `make check-licenses`와 `reuse lint`가 로컬과 push CI에서 통과하고, 표와
   다른 라이선스를 일부러 넣으면 표 검사가 실패한다.
 

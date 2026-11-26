@@ -2,14 +2,17 @@
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 # Full Buildroot build, the check that kn1_defconfig is in savedefconfig
-# form, boot smoke test, V1, V5 and V6 (docs/design.md D42, 11). Runs every
-# night and on demand; the per-push checks are in ci.yml.
+# form, boot smoke test, V1, V5, V6 and the legal-info check (docs/design.md
+# D42, 11). Runs every night and on demand; the per-push checks are in
+# ci.yml.
 
 name: Nightly
 
 on:
   schedule:
-    - cron: '0 17 * * *'
+    # Not on the hour: GitHub may delay scheduled runs at the start of an
+    # hour, a time of high load
+    - cron: '23 17 * * *'
   workflow_dispatch:
 
 permissions:
@@ -90,6 +93,28 @@ jobs:
       - name: V6 (end to end, knpu-infer)
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: make test-v6
+
+      # Buildroot's legal-info (docs/design.md 12.4): the only warning is
+      # that Buildroot's own source is not saved, and every package of
+      # br2-external/ is in the manifests
+      - name: Check Buildroot legal-info
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: |
+          make br-legal-info > legal-info.log 2>&1 ||
+            { tail -n 50 legal-info.log; exit 1; }
+          if grep -E '^(WARNING|ERROR)' legal-info.log |
+             grep -v -x 'WARNING: the Buildroot source code has not been saved'
+          then
+            echo 'legal-info: unexpected warnings or errors'
+            exit 1
+          fi
+          for d in br2-external/package/*/; do
+            p=$(basename "$d")
+            awk -F, -v p="\"$p\"" '$1 == p { found = 1 } END { exit !found }' \
+              output/legal-info/manifest.csv \
+              output/legal-info/host-manifest.csv ||
+              { echo "legal-info: $p is not in the manifests"; exit 1; }
+          done
 
       - name: Keep the end of the build log
         if: failure()

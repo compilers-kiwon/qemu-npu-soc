@@ -21,3 +21,15 @@ define UBOOT_KN1_ADD_BOARD
 	$(APPLY_PATCHES) $(@D) $(UBOOT_KN1_SRC_DIR)/patches \*.patch
 endef
 UBOOT_POST_PATCH_HOOKS += UBOOT_KN1_ADD_BOARD
+
+# legal-info saves the tarball and the applied patches but not the files
+# copied in above; they go next to them, at their paths in the U-Boot tree
+# (docs/design.md 12.4)
+define UBOOT_KN1_SAVE_BOARD
+	mkdir -p $(UBOOT_REDIST_SOURCES_DIR)/board \
+		$(UBOOT_REDIST_SOURCES_DIR)/configs
+	cp -r $(UBOOT_KN1_SRC_DIR)/board/kiwon $(UBOOT_REDIST_SOURCES_DIR)/board/
+	cp $(UBOOT_KN1_SRC_DIR)/configs/kn1-evb_defconfig \
+		$(UBOOT_REDIST_SOURCES_DIR)/configs/
+endef
+UBOOT_POST_LEGAL_INFO_HOOKS += UBOOT_KN1_SAVE_BOARD

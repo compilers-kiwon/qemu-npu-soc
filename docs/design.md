@@ -992,12 +992,15 @@ gcc와 qemu-user도 설치한다. 바인딩과 DT의 스키마
 코드(QEMU, 리눅스, U-Boot, TF-A)의 형식 검사(`tests/style/checkpatch.sh`:
 빌드가 받는 각 업스트림 tarball의 `checkpatch.pl`과 그 업스트림의 설정)와,
 파일마다의 라이선스가 12.4절 표와 맞는지 보는
-검사(`tests/license/check-licenses.py`)도 push마다 돈다. 야간 작업은 전체
+검사(`reuse lint`와 그 보고서를 읽는 `tests/license/check-licenses.py`)도
+push마다 돈다. 야간 작업은 전체
 빌드, `kn1_defconfig`의 형태 검사(빌드한 커널 설정을
 `make br-linux-update-defconfig`로 다시 저장하고 `git diff`로 비교, 8.1절),
 부팅 스모크 시험(`tests/boot/`, M1.2 완료 조건), V1(`tests/qemu/run-v1.sh`),
 V5(`tests/driver/kn1_v5_test.py`), V6(`tests/e2e/kn1_v6_test.py`)을 돌리고,
-Buildroot `legal-info`가 이 저장소의 패키지에 경고를 내지 않는지 본다(12.4절).
+Buildroot `legal-info`가 `br2-external/`의 패키지를 모두 매니페스트에 담고,
+Buildroot 자체 소스를 저장하지 않았다는 것 밖의 경고를 내지 않는지
+본다(12.4절).
 빌드와 시험의 진입점은 저장소 맨 위 `Makefile`의 대상이고(`make`, `make test`,
 `make check`, `make check-style`, `make check-licenses`), CI도 같은 대상을
 부른다.
@@ -1111,10 +1114,17 @@ lcc_llvm 소스 압축에는 lcc도 들어 있으므로 압축과 풀어 놓은 
 디렉터리에만 둔다.
 
 Buildroot 외부 패키지는 `_LICENSE`와 함께 `_LICENSE_FILES`로 라이선스 전문을
-가리켜, `legal-info`가 그 라이선스를 모으게 한다. 패키지 소스
-디렉터리(`linux/`, `tests/driver/`, `runtime/`, `models/`)에는 `LICENSES/`가
-없으므로, rsync 뒤 훅이 그 패키지가 쓰는 전문을 패키지 빌드 디렉터리로
-복사한다. 파일마다의 라이선스가 위 표와 맞는지는 push CI가 검사한다(11절).
+가리켜, `legal-info`가 그 라이선스를 모으게 한다. `legal-info`는 버전이 없는
+패키지를 Buildroot의 일부로 보고 건너뛰므로, 로컬 패키지는 Buildroot가 로컬
+디렉터리의 소스에 쓰는 버전 `custom`을 둔다. 패키지 소스 디렉터리(`linux/`,
+`tests/driver/`, `runtime/`, `models/`)에는 `LICENSES/`가 없으므로, rsync 뒤
+훅이 그 패키지가 쓰는 전문을 패키지 빌드 디렉터리로 복사하고, 전문의 해시를
+패키지의 `.hash`에 둔다. 버전을 고정한 리눅스(커널, 헤더)와 TF-A의 해시
+파일에도 라이선스 파일의 해시를 둔다. `legal-info`는 tarball과 적용한 패치를
+저장하지만 훅이 복사해 넣는 파일(U-Boot 보드와 defconfig, TF-A 플랫폼, QEMU의
+kn1 소스와 공유 코어, `knpu_cmd.h`)은 저장하지 않으므로, legal-info 뒤 훅이 그
+파일을 저장된 소스 옆에 트리 경로 그대로 둔다. 파일마다의 라이선스가 위 표와
+맞는지는 push CI가 검사한다(11절).
 
 ---
 

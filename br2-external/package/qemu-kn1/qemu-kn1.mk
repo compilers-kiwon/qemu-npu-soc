@@ -48,6 +48,17 @@ define HOST_QEMU_KN1_ADD_KN1_SOURCES
 endef
 HOST_QEMU_KN1_POST_PATCH_HOOKS += HOST_QEMU_KN1_ADD_KN1_SOURCES
 
+# legal-info saves the tarball and the applied patches but not the files
+# copied in above; they go next to them, at their paths in the QEMU tree
+# (docs/design.md 12.4)
+define HOST_QEMU_KN1_SAVE_KN1_SOURCES
+	cp -r $(addprefix $(QEMU_KN1_KN1_SRC_DIR)/,hw include tests) \
+		$(HOST_QEMU_KN1_REDIST_SOURCES_DIR)/
+	cp $(addprefix $(QEMU_KN1_NPU_CORE_DIR)/,knpu_cmd.h knpu_core.h knpu_core.c) \
+		$(HOST_QEMU_KN1_REDIST_SOURCES_DIR)/hw/misc/
+endef
+HOST_QEMU_KN1_POST_LEGAL_INFO_HOOKS += HOST_QEMU_KN1_SAVE_KN1_SOURCES
+
 # Override CPP, as it expects to be able to call it like it'd
 # call the compiler (same as Buildroot's host-qemu).
 define HOST_QEMU_KN1_CONFIGURE_CMDS

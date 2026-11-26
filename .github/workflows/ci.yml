@@ -161,10 +161,13 @@ jobs:
       - name: Check the style
         run: make check-style
 
+  # REUSE compliance and the license of every file against the table of
+  # docs/design.md 12.4
   reuse-lint:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
 
-      - name: Check REUSE compliance
-        uses: fsfe/reuse-action@v6
+      # reuse lint, then the table check on its report
+      - name: Check REUSE compliance and the license table
+        run: make check-licenses
