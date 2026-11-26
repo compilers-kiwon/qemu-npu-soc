@@ -132,6 +132,35 @@ jobs:
       - name: Check the binding and the device tree
         run: tests/dt/check-dt.sh "dl/$LINUX_TARBALL"
 
+  # Upstream style checks (docs/design.md 11): the checkpatch.pl of QEMU,
+  # Linux, U-Boot and TF-A on the files that go into their trees
+  checkpatch:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: true
+
+      - name: Install Buildroot host dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential bc cpio file rsync unzip wget
+
+      - name: Restore the source tarballs
+        uses: actions/cache@v6
+        with:
+          path: |
+            buildroot/dl/qemu-kn1/*.tar.*
+            buildroot/dl/linux/*.tar.*
+            buildroot/dl/uboot/*.tar.*
+            buildroot/dl/arm-trusted-firmware/*.tar.*
+          key: checkpatch-${{ hashFiles('br2-external/package/qemu-kn1/qemu-kn1.hash', 'br2-external/patches/*/*.hash') }}
+
+      # Buildroot downloads the tarballs that are not in the cache and checks
+      # them against the same .hash files as the build
+      - name: Check the style
+        run: make check-style
+
   reuse-lint:
     runs-on: ubuntu-24.04
     steps:

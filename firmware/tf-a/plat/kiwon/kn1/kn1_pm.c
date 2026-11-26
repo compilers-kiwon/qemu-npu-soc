@@ -24,18 +24,15 @@
  */
 static uintptr_t secure_entrypoint;
 
-/* Make composite power state parameter till power level 0 */
-#if PSCI_EXTENDED_STATE_ID
-
-#define kn1_make_pwrstate_lvl0(lvl0_state, pwr_lvl, type) \
-		(((lvl0_state) << PSTATE_ID_SHIFT) | \
-		 ((type) << PSTATE_TYPE_SHIFT))
-#else
+/*
+ * Make composite power state parameter till power level 0. kn1 uses the
+ * original power-state format: platform.mk leaves PSCI_EXTENDED_STATE_ID
+ * at its default of 0.
+ */
 #define kn1_make_pwrstate_lvl0(lvl0_state, pwr_lvl, type) \
 		(((lvl0_state) << PSTATE_ID_SHIFT) | \
 		 ((pwr_lvl) << PSTATE_PWR_LVL_SHIFT) | \
 		 ((type) << PSTATE_TYPE_SHIFT))
-#endif /* PSCI_EXTENDED_STATE_ID */
 
 #define kn1_make_pwrstate_lvl1(lvl1_state, lvl0_state, pwr_lvl, type) \
 		(((lvl1_state) << PLAT_LOCAL_PSTATE_WIDTH) | \

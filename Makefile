@@ -22,6 +22,9 @@ BR_PATH := $(shell printf '%s' "$$PATH" | tr ':' '\n' | \
                    grep -v '[[:space:]]' | paste -sd: -)
 BR_MAKE = PATH='$(BR_PATH)' $(MAKE) -C buildroot O='$(O)' \
           BR2_EXTERNAL='$(CURDIR)/br2-external'
+# Buildroot's download directory (BR2_DL_DIR in the environment overrides it,
+# as in Buildroot)
+BR_DL_DIR := $(or $(BR2_DL_DIR),$(CURDIR)/buildroot/dl)
 
 TEST_ARGS = --images '$(O)/images' --host-bin '$(O)/host/bin' \
             --log-dir '$(O)/test-logs'
@@ -32,7 +35,7 @@ TEST_ARGS = --images '$(O)/images' --host-bin '$(O)/host/bin' \
 
 .PHONY: all defconfig run test test-boot test-v1 test-v5 test-v6 check \
         check-npu-core compiler check-compiler update-vectors \
-        check-runtime help FORCE
+        check-runtime check-style help FORCE
 
 # The full image in $(O)/images
 all: $(O)/.config
@@ -104,6 +107,14 @@ update-vectors: compiler
 check-runtime:
 	cd runtime && PATH='$(O)/host/bin':"$$PATH" cargo test --locked --offline
 
+# Upstream style checks with the checkpatch.pl of QEMU, Linux, U-Boot and
+# TF-A from the source tarballs of the build; Buildroot downloads the
+# missing ones and checks them against the .hash files
+check-style: $(O)/.config
+	$(BR_MAKE) host-qemu-kn1-source linux-source uboot-source \
+	           arm-trusted-firmware-source
+	tests/style/checkpatch.sh '$(BR_DL_DIR)'
+
 help:
 	@echo 'Image (Buildroot, in $(O)):'
 	@echo '  make                 build the full image'
@@ -116,4 +127,6 @@ help:
 	@echo '  make check           check-npu-core, check-compiler and check-runtime'
 	@echo '  make compiler        build the compiler without testing it'
 	@echo '  make update-vectors  write models/*/vectors/ again'
+	@echo 'Source checks:'
+	@echo '  make check-style     upstream style checks (checkpatch.pl)'
 	@echo 'Variables: O=<Buildroot output directory>, MLIR_DIR=<MLIR CMake package>'
