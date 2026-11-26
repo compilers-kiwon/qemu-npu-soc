@@ -152,7 +152,7 @@ U-Boot는 FIP 안에 들어가므로, U-Boot를 고쳤을 때도 TF-A를 다시 
 
 QEMU 장치(`hw/qemu/`)나 공유 코어(`hw/npu-core/`)를 고친 뒤에도 마찬가지다.
 `qemu-kn1` 패키지는 이 파일들을 QEMU 소스 트리로 복사해 빌드하므로, `make`나
-`make br-host-qemu-kn1-rebuild`로는 QEMU가 바뀌지 않는다.
+`make br-host-qemu-kn1-rebuild`로는 고친 내용이 QEMU에 들어가지 않는다.
 `make br-host-qemu-kn1-dirclean`을 먼저 돌리고 `make`를 부른다.
 
 ```bash
