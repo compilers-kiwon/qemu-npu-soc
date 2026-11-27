@@ -1473,6 +1473,18 @@ static void test_submit_checks(int fd)
 		if (p != MAP_FAILED)
 			munmap(p, 4096);
 	}
+	{
+		struct drm_prime_handle prime = {
+			.handle = exact,
+			.flags = DRM_CLOEXEC,
+			.fd = -1,
+		};
+		int ret = xioctl(fd, DRM_IOCTL_PRIME_HANDLE_TO_FD, &prime);
+
+		check_err(ret, -EINVAL, "PRIME_HANDLE_TO_FD of a command stream");
+		if (!ret)
+			close(prime.fd);
+	}
 
 	handle_close(fd, exact);
 	handle_close(fd, two_d);

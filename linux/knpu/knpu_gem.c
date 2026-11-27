@@ -9,6 +9,7 @@
 
 #include <drm/drm_file.h>
 #include <drm/drm_gem.h>
+#include <drm/drm_prime.h>
 #include <drm/drm_print.h>
 
 #include "knpu_drv.h"
@@ -31,11 +32,21 @@ static int knpu_gem_mmap(struct drm_gem_object *obj, struct vm_area_struct *vma)
 	return drm_gem_dma_object_mmap(obj, vma);
 }
 
+static struct dma_buf *knpu_gem_export(struct drm_gem_object *obj, int flags)
+{
+	/* Nor may another device write it through a dma-buf */
+	if (to_knpu_bo(obj)->info)
+		return ERR_PTR(-EINVAL);
+
+	return drm_gem_prime_export(obj, flags);
+}
+
 static const struct drm_gem_object_funcs knpu_gem_funcs = {
 	.free = knpu_gem_free_object,
 	.print_info = drm_gem_dma_object_print_info,
 	.get_sg_table = drm_gem_dma_object_get_sg_table,
 	.vmap = drm_gem_dma_object_vmap,
+	.export = knpu_gem_export,
 	.mmap = knpu_gem_mmap,
 	.vm_ops = &drm_gem_dma_vm_ops,
 };

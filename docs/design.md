@@ -578,6 +578,9 @@ Linux 7.3.1(D43)을 Buildroot로 빌드한다. 설정(D35)은
 - debugfs(`/sys/kernel/debug/accel/<장치>/`): `inject_hang`에 1을 쓰면 다음
   작업의 `START`를 쓰지 않아 타임아웃을 일으킨다(V5). `last_submit`은 마지막
   작업에 쓴 `QBASE`, `QSIZE`, 영역 베이스를 보여 준다.
+- 떼어 내기: remove는 Ethos-U처럼 `drm_dev_unregister()`만 부르고
+  `drm_dev_unplug()`는 부르지 않는다. 파일이 열린 채 sysfs로 드라이버를 떼어
+  내는 경우는 다루지 않는다(`rmmod`는 열린 파일이 막는다).
 
 ### 8.3 UAPI
 
@@ -607,6 +610,9 @@ Ethos-U와 다른 점:
   `drm_gem_dma_resv_wait()`는 fence의 오류를 보지 않는다. 기다린 뒤에는 예약
   객체를 잠그고 fence를 본다. 잠그지 않은 순회는 signal된 fence를 건너뛰기
   때문이다(`dma-resv.c`). fence context마다 가장 최근 것만 본다.
+- 명령열 버퍼는 매핑할 수 없을 뿐 아니라 dma-buf로 내보낼 수도 없다.
+  Ethos-U는 매핑만 막는다. 검증한 명령열을 다른 장치가 고치지 못하게 하려는
+  것이다(8.4절).
 
 ### 8.4 명령열 검증기
 
