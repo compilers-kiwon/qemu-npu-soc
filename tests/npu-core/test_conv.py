@@ -9,7 +9,8 @@ command stream (DMA in, OP_CONV, DMA out) on knpu_run and compares the
 output bytes and the performance counters. The cases cover 1x1 and 3x3
 kernels, stride 1 and 2, VALID and SAME padding and both rounding modes,
 plus edge values of the requantization (including multipliers that put
-many results exactly on .5, where the two rounding modes differ), a
+many results exactly on .5, where the two rounding modes differ; that
+case also fails if the other mode's reference output is the same), a
 non-square kernel and 2-D DMA.
 """
 
@@ -99,7 +100,7 @@ def valid_padding(size, k, s):
 class Case:
     def __init__(self, name, rng, h, w, ic, oc, k, s, padding, mode,
                  edge=None, dma_2d=False):
-        self.name, self.mode, self.dma_2d = name, mode, dma_2d
+        self.name, self.mode, self.edge, self.dma_2d = name, mode, edge, dma_2d
         self.h, self.w, self.ic, self.oc = h, w, ic, oc
         self.kh, self.kw = k
         self.sh, self.sw = s
@@ -297,6 +298,12 @@ def main():
         for key, value in want.items():
             if res[key] != value:
                 problems.append(f"{key} {res[key]} != {value}")
+        # The ties case only tests the rounding mode while the two reference
+        # builds disagree on it, as test_add.py also checks
+        if case.edge == "ties":
+            other = "single" if case.mode == "double" else "double"
+            if case.golden(golden_tool[other], args.work_dir) == expected:
+                problems.append("the two rounding modes give the same output")
         if problems:
             failures += 1
             print(f"FAIL {case.name}: " + "; ".join(problems))
