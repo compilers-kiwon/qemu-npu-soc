@@ -487,6 +487,10 @@ DRAM 범위는 장치가 아니라 커널 검증기가 지킨다(8.4절, D30).
   상관없이 읽는데, kn1 DT에서는 꺼져 있는 보안 RAM 노드가 먼저 나온다.
 - TF-A가 BL33을 올리는 `0x6000_0000`에 링크하고(`TEXT_BASE`), 그 아래를
   재배치 전 스택으로 쓴다.
+- U-Boot가 쓰는 메모리(재배치, DTB, 적재 이미지)는 4 GiB 아래로
+  제한한다(`board_get_usable_ram_top()`). DRAM 꼭대기는 NPU CMA 풀과 겹쳐
+  풀을 예약하지 못하고 커널 DTB를 풀 안에 두기 때문이다(TI AM65x, J721E
+  보드와 같은 방식).
 - kn1에 있는 장치에 필요한 기능만 켠다: PL011, virtio-mmio 블록 장치, GPT와
   ext4, bootstd의 extlinux, PSCI 리셋과 끄기. arm64의 기본값인 UEFI 로더는
   그대로 둔다.

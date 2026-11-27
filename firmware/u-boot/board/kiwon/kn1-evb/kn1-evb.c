@@ -67,3 +67,18 @@ int dram_init_banksize(void)
 {
 	return fdtdec_setup_memory_banksize();
 }
+
+/*
+ * Keep U-Boot, the device trees and the images it loads below 4 GiB.
+ * Relocating to the top of DRAM overlaps the NPU CMA pool in its last
+ * 64 MiB (kn1-evb.dts): LMB cannot reserve the pool and the kernel's
+ * device tree lands inside it, where Linux hands the pages to CMA. TI's
+ * AM65x and J721E boards limit U-Boot the same way.
+ */
+phys_addr_t board_get_usable_ram_top(phys_size_t total_size)
+{
+	if (gd->ram_top > SZ_4G)
+		return SZ_4G;
+
+	return gd->ram_top;
+}
