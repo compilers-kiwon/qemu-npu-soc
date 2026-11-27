@@ -48,8 +48,8 @@ GitHub에서 한 번 성공한다.
    패치, QEMU v11.1.3을 빌드하는 `br2-external` 호스트 패키지.
 2. 디바이스 트리: `kn1.dtsi`와 `kn1-evb.dts`(D4). 이 단계에는 NPU 노드가
    없다.
-3. 커널 직접 부팅: `-kernel`과 `-dtb`로 Linux 7.3.1(arm64 `defconfig`와 kn1
-   조각, D35)을 띄워 Buildroot 셸까지 간다. PSCI는 QEMU 내장 기능이 맡는다.
+3. 커널 직접 부팅: `-kernel`과 `-dtb`로 Linux 7.3.1(arm64 `defconfig`, D35)을
+   띄워 Buildroot 셸까지 간다. PSCI는 QEMU 내장 기능이 맡는다.
 4. TF-A: `plat/kiwon/kn1`(D34). BL1과 FIP를 부트 플래시에 넣고, BL31이
    PSCI를 맡는다.
 5. U-Boot: 보드 `kiwon/kn1-evb`. 자체 DT로 동작하고, virtio 디스크의
@@ -491,8 +491,8 @@ Micro와 비트 단위로 같다(V6). SRAM 크기 시연 결과를 문서로 남
 - `knpu-tile`: 한 행 타일로도 들어가지 않는 합성곱과 FC의 출력 채널
   타일(필요하면 출력 H 타일과 겹쳐 씀), ADD의 출력 H 타일(설계 9.4절).
 - `knpu-schedule`: 채널 구간이 있는 타일. 채널 타일들이 SRAM의 같은 입력을
-  읽고, 다음 타일의 상수를 미리 읽으며, 출력은 2-D DMA(행 길이 n, 횟수 H·W,
-  DRAM 쪽 간격 C)로 arena에 쓴다.
+  읽고, 다음 타일의 상수를 미리 읽으며, 출력은 2-D DMA(행 길이 n, 횟수는
+  타일의 출력 화소 수로 한 번에 65,535까지, DRAM 쪽 간격 C)로 arena에 쓴다.
 - V4: 출력 채널 타일, ADD의 H 타일, 2-D 저장의 lit 시험.
 - V3: SRAM 64 KiB(출력 H 타일 두 층, 출력 채널 타일 한 층)와 32 KiB(출력 H
   타일 일곱 층, 출력 채널 타일 두 층)로 컴파일한 ResNet-8.

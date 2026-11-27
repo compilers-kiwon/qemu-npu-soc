@@ -10,7 +10,8 @@ def Knpu_Dialect : Dialect {
   let name = "knpu";
   let summary = "kn1-npu graph and command operations";
   let description = [{
-    The dialect has two levels (docs/design.md 9.4).
+    The dialect has three groups of operations on two levels
+    (docs/design.md 9.4).
 
     Graph operations (`knpu.conv2d`, `knpu.avgpool`, `knpu.add`,
     `knpu.cpu`) take and return tensor values. The `knpu-import` pass builds
@@ -21,9 +22,12 @@ def Knpu_Dialect : Dialect {
     `knpu.elementwise`, `knpu.dma_wait`, `knpu.kernel_wait`, `knpu.stop`)
     follow the commands of the NPU specification (docs/npu-spec.md) almost
     one to one (`knpu.elementwise` is OP_ADD); the values of the SET commands
-    are attributes. `knpu.region`, `knpu.io`, `knpu.cpu_step` and
-    `knpu.cpu_code` describe the region table, the model inputs and outputs,
-    the CPU steps and the CPU code of `model.knpu` (docs/model-format.md).
+    are attributes.
+
+    Model file operations (`knpu.region`, `knpu.io`, `knpu.cpu_step`,
+    `knpu.cpu_code`) describe the region table, the model inputs and
+    outputs, the CPU steps and the CPU code of `model.knpu`
+    (docs/model-format.md).
   }];
   let cppNamespace = "::mlir::knpu";
 }

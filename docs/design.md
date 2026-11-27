@@ -147,7 +147,7 @@ QEMU ARMv8 `virt` 보드 위에 SystemC 가속기 모델, 리눅스 드라이버
 | CPU | SoC | Cortex-A72 4개, EL3와 EL2, 클러스터 하나(D21) |
 | 인터럽트 컨트롤러 | SoC | GICv3 distributor와 redistributor, ITS는 예약 |
 | 타이머 | SoC | Arm generic timer |
-| 보안 RAM | SoC | TF-A BL2와 BL31용 온칩 RAM 16 MiB |
+| 보안 RAM | SoC | TF-A용 온칩 RAM 16 MiB(보조 코어의 hold pen, BL1의 RW 데이터, BL2, BL31) |
 | 콘솔 | SoC | PL011 UART0(비보안), PL011 UART1(보안, TF-A용) |
 | RTC | SoC | PL031(D24) |
 | 워치독 | SoC | SBSA 범용 워치독(D24) |
@@ -564,8 +564,9 @@ Linux 7.3.1(D43)을 Buildroot로 빌드한다. 설정(D35)은
 - 오류: 장치가 오류로 멈추면 오류 코드와 `ERR_OFFSET`을 커널 로그에 남기고
   그 작업의 fence를 `-EIO`로 끝낸다. 장치는 이미 멈춰 있으므로 리셋하지 않고
   다음 작업을 받는다.
-- 타임아웃(500 ms): runtime PM으로 장치를 껐다 켜서 soft reset하고, 그 작업은
-  `-ECANCELED`로 끝난다. 껐다 켜기는 Ethos-U처럼 `pm_runtime_force_suspend()`와
+- 타임아웃(500 ms): runtime PM으로 장치를 껐다 켜서 soft reset한다. 그 작업의
+  장치 fence는 `-ETIMEDOUT`으로, 스케줄러 fence는 `-ECANCELED`로 끝나고,
+  사용자는 `BO_WAIT`에서 `-EIO`를 받는다. 껐다 켜기는 Ethos-U처럼 `pm_runtime_force_suspend()`와
   `pm_runtime_force_resume()`으로 한다. Linux 7.3.1에서 뒤의 함수는
   `CONFIG_PM_SLEEP`이 없으면 `-ENXIO`만 돌려주는 빈
   함수라(`include/linux/pm_runtime.h`), 그런 설정에서는 복구 뒤 장치가 꺼지고
@@ -592,8 +593,8 @@ Linux 7.3.1(D43)을 Buildroot로 빌드한다. 설정(D35)은
 |-------|------|
 | `KNPU_QUERY` | `ID`, `VERSION`, `CONFIG` 레지스터와 SRAM 크기. 영역 수와 반올림 방식은 `CONFIG`에서 읽는다 |
 | `KNPU_BO_CREATE` | 버퍼를 할당하고 GEM 핸들을 돌려준다 |
-| `KNPU_BO_MMAP_OFFSET` | 버퍼의 mmap 오프셋. 명령열 버퍼는 매핑할 수 없다 |
-| `KNPU_BO_WAIT` | 버퍼를 쓰는 작업이 끝나기를 기다린다. 절대 시각 타임아웃이 지나면 `-ETIME`, 그 버퍼를 마지막으로 쓴 작업이 실패했으면 `-EIO` |
+| `KNPU_BO_MMAP_OFFSET` | 버퍼의 mmap 오프셋. 명령열 버퍼는 오프셋은 받아도 `mmap()`이 거부된다 |
+| `KNPU_BO_WAIT` | 버퍼를 쓰는 작업이 끝나기를 기다린다. 절대 시각 타임아웃이 지나면 `-ETIME`, 그 버퍼를 쓴 제출자마다 가장 최근 작업 가운데 실패한 것이 있으면 `-EIO` |
 | `KNPU_CMDSTREAM_CREATE` | 사용자 메모리의 명령열을 커널 소유 버퍼로 복사하고 검증한다 |
 | `KNPU_SUBMIT` | 명령열 핸들, 영역마다 버퍼 핸들, 선택적인 perfmon |
 | `KNPU_PERFMON_CREATE` | 성능 카운터 객체를 만든다 |
@@ -851,7 +852,7 @@ MLIR의 `mlir/examples/standalone`과 같은 구성을 가진 트리 밖 MLIR
 |------|---------|
 | `knpu-import` | pragma가 붙은 함수를 그래프 연산으로 바꾼다(`conv2d`, `avgpool`, `add`, 1x1 `conv2d`가 되는 `fc`, `reshape`, `cpu`). 배열 이름으로 데이터 흐름을 이으므로 한 텐서를 여러 층이 읽을 수 있다(ResNet-8의 잔차). 상수 전역은 원소형을 되살려 텐서 상수로 만들고, 재양자화 표는 채널마다 (곱셈 계수, 시프트)로 엮는다. 바꾼 NPU 층 함수, `knpu.*` 속성, 더 쓰이지 않는 전역을 지운다. `cpu` 층 함수는 남기고 연결을 external로 바꾼다(공유 객체가 내보내도록). M2에서 `cpu` 층은 마지막 NPU 층 뒤에만 올 수 있다. |
 | `knpu-tile` | `sram-size`와 이중 버퍼링을 고려해 타일 크기(출력 H, 출력 채널)를 정하고, 층을 타일로 나눈다(`tensor.extract_slice`, 타일별 pad, `tensor.insert_slice`). avgpool도 합성곱과 같은 창 연산이라 출력 H 타일을 쓰고, add는 두 입력과 출력을 같은 행 구간으로 나눈다. 한 행 타일로도 들어가지 않는 합성곱과 FC(H = 1)는 출력 채널을 나눈다. 채널 타일마다 가중치·bias·재양자화 표의 채널 구간(OHWI에서 연속)을 쓰고 출력 [1, H, W, n]을 채널 오프셋에 넣으며, 필요하면 출력 H 타일과 겹쳐 쓴다. 그래도 들어가지 않으면 오류다. 옵션 `overlap=false`이면 입출력 버퍼를 한 벌로 보고 정한다. |
-| `knpu-schedule` | arena 배치와 SRAM 배치를 정하고 명령 연산으로 낮춘다. 층 사이 활성값은 다음 층이 SRAM에서 바로 읽도록 남기고(들어갈 때), arena에는 모델 입력, CPU 층과 주고받는 텐서, SRAM에 남길 수 없는 텐서를 둔다. 활성값을 SRAM에 두는 단계는 셋이다: 마지막으로 읽는 층까지, 처음 읽는 층까지(그 층은 활성값을 arena로 쓰는 DMA와 함께 SRAM에서 읽고, 뒤 층은 arena에서 읽는다. 둘 다 SRAM을 읽기만 하므로 명세 9절의 충돌이 아니다), arena를 거침. 처음 읽는 층이 타일 하나이면 뒤에서 타일 층이 읽어도 둘째 단계를 쓸 수 있다. add는 입력이 둘이고, 잔차처럼 여러 층이 읽는 텐서도 같은 단계로 다룬다. 제자리 덧셈(명세 6.4절)은 쓰지 않는다. 층의 상수는 SRAM에 두 벌로 둔다. 상수를 쓰는 층의 연산 동안, 자리가 있으면 상수가 있는 다음 층의 상수를 미리 읽는다(avgpool·reshape처럼 상수가 없는 층은 건너뛴다). SRAM 배치는 버퍼마다 쓰이는 층의 범위(수명)로 정한다. 여러 층에 걸치는 버퍼(상주 활성값, 미리 읽는 상수)를 큰 것부터 놓고(TFLite Micro의 greedy 배치와 같은 방식) 한 층 안의 버퍼를 만든 순서로 그 뒤에 놓는다. 들어가지 않으면 한 층 안의 버퍼도 큰 것부터 다시 놓아 보고, 그래도 들어가지 않으면 미리 읽기나 상주를 한 단계 거두고 다시 놓는다. 거둘 것은 거두면 들어가지 않은 버퍼의 수명 동안 SRAM이 비는 선택 가운데 DMA로 더 옮길 바이트가 가장 적은 것이고, 그런 선택이 없으면 가장 큰 것이다. 배치가 들어가면 필요 없던 거둠을 비싼 것부터 되돌린다. 옵션 `placement=largest`는 M3.6 이전의 배치 규칙이다: 활성값은 마지막으로 읽는 층까지 두거나 arena를 거치게 하고(둘째 단계 없음), 한 층 안의 버퍼는 만든 순서로만 놓으며, 들어가지 않으면 들어가지 않은 버퍼와 함께 쓰이는 선택 가운데 가장 큰 것을 거두고 되돌리지 않는다. 기본값 `placement=cost`가 앞의 규칙이다. 층 안에서는 다음 타일의 입력 DMA를 현재 타일의 연산 앞에 둔다. 출력 채널 타일은 입력이 들어가면 한 번 읽어 함께 쓰고, 다음 타일의 상수를 미리 읽으며, 출력을 SRAM에 남기지 않고 2-D DMA(행 길이 n, 횟수 H·W, DRAM 쪽 간격 C)로 arena에 쓴다. CPU 층은 `knpu.cpu_step`(arena에서 배열로 복사, 함수 호출, 배열에서 arena로 복사)이 된다. 옵션 `overlap=false`는 비교용으로 미리 읽기와 상주 없이 층마다, 타일마다 arena를 왕복하는 직렬 스케줄을 낸다. |
+| `knpu-schedule` | arena 배치와 SRAM 배치를 정하고 명령 연산으로 낮춘다. 층 사이 활성값은 다음 층이 SRAM에서 바로 읽도록 남기고(들어갈 때), arena에는 모델 입력, CPU 층과 주고받는 텐서, SRAM에 남길 수 없는 텐서를 둔다. 활성값을 SRAM에 두는 단계는 셋이다: 마지막으로 읽는 층까지, 처음 읽는 층까지(그 층은 활성값을 arena로 쓰는 DMA와 함께 SRAM에서 읽고, 뒤 층은 arena에서 읽는다. 둘 다 SRAM을 읽기만 하므로 명세 9절의 충돌이 아니다), arena를 거침. 처음 읽는 층이 타일 하나이면 뒤에서 타일 층이 읽어도 둘째 단계를 쓸 수 있다. add는 입력이 둘이고, 잔차처럼 여러 층이 읽는 텐서도 같은 단계로 다룬다. 제자리 덧셈(명세 6.4절)은 쓰지 않는다. 층의 상수는 SRAM에 두 벌로 둔다. 상수를 쓰는 층의 연산 동안, 자리가 있으면 상수가 있는 다음 층의 상수를 미리 읽는다(avgpool·reshape처럼 상수가 없는 층은 건너뛴다). 미리 읽는 상수는 자리가 있으면, 아직 돌고 있을 수 있는 앞 두 층(연산 큐 깊이 2)의 버퍼와 떨어뜨려 놓아 그 연산을 기다리지 않게 한다. 거둘 때는 이 여유를 먼저 거둔다. SRAM 배치는 버퍼마다 쓰이는 층의 범위(수명)로 정한다. 여러 층에 걸치는 버퍼(상주 활성값, 미리 읽는 상수)를 큰 것부터 놓고(TFLite Micro의 greedy 배치와 같은 방식) 한 층 안의 버퍼를 만든 순서로 그 뒤에 놓는다. 들어가지 않으면 한 층 안의 버퍼도 큰 것부터 다시 놓아 보고, 그래도 들어가지 않으면 미리 읽기나 상주를 한 단계 거두고 다시 놓는다. 거둘 것은 거두면 들어가지 않은 버퍼의 수명 동안 SRAM이 비는 선택 가운데 DMA로 더 옮길 바이트가 가장 적은 것이고, 그런 선택이 없으면 가장 큰 것이다. 배치가 들어가면 필요 없던 거둠을 비싼 것부터 되돌린다. 옵션 `placement=largest`는 M3.6 이전의 배치 규칙이다: 활성값은 마지막으로 읽는 층까지 두거나 arena를 거치게 하고(둘째 단계 없음), 한 층 안의 버퍼는 만든 순서로만 놓으며, 들어가지 않으면 들어가지 않은 버퍼와 함께 쓰이는 선택 가운데 가장 큰 것을 거두고 되돌리지 않는다. 기본값 `placement=cost`가 앞의 규칙이다. 층 안에서는 다음 타일의 입력 DMA를 현재 타일의 연산 앞에 둔다. 출력 채널 타일은 입력이 들어가면 한 번 읽어 함께 쓰고, 다음 타일의 상수를 미리 읽으며, 출력을 SRAM에 남기지 않고 2-D DMA(행 길이 n, 횟수는 타일의 출력 화소 수(행 수·W)로 한 번에 65,535까지, DRAM 쪽 간격 C)로 arena에 쓴다. CPU 층은 `knpu.cpu_step`(arena에서 배열로 복사, 함수 호출, 배열에서 arena로 복사)이 된다. 옵션 `overlap=false`는 비교용으로 미리 읽기와 상주 없이 층마다, 타일마다 arena를 왕복하는 직렬 스케줄을 낸다. |
 | `knpu-insert-waits` | 명세 9절의 큐 규칙(큐 깊이 2, 암묵 대기, 반대쪽 큐와의 SRAM 겹침)을 따라가며 충돌하는 곳에만 대기 명령을 넣는다. Vela의 대기 계산과 같은 방식이다. |
 | `knpu-estimate` | 대기 명령까지 들어간 명령열을 큐 모델로 따라가며 명령마다 시작·끝 사이클을 정하고, 층마다와 전체의 추정 사이클을 남긴다(9.1절). |
 
@@ -987,11 +988,11 @@ CPU 섹션 둘은 형식 minor 1에서 더했다. CPU 층이 있는 모델만 �
 | 단계 | 내용 | 위치 |
 |------|------|------|
 | V1 | 장치 모델: 레지스터, 인터럽트, 명령 하나하나, 동기화 오류를 포함한 오류 경로 | QEMU qtest |
-| V2 | 정답값: 두 번 빌드한 TFLite Micro 참조 커널(이중·단일 반올림)로 층별, 끝-끝 정답을 만든다 | 호스트 |
+| V2 | 정답값: 두 번 빌드한 TFLite Micro 참조 커널(이중·단일 반올림)로 연산 단위(합성 입력)와 모델 단위(최종 출력과 logits) 정답을 만든다 | 호스트 |
 | V3 | 컴파일한 명령열을 공유 장치 코어에서 실행해 V2와 비트 단위로 비교한다. CPU 섹션의 aarch64 코드는 qemu-aarch64 사용자 모드에서 돌려 최종 출력을 비교한다 | 호스트 |
 | V4 | 컴파일러 패스 | `lit` / `FileCheck` |
 | V5 | 드라이버: 검증기 부정 시험(잘못된 명령열과 범위를 벗어난 명령열은 거부돼야 하고, 거부 이유를 커널 디버그 메시지의 규칙과 명령 오프셋으로 확인한다. 무작위로 바꾼 명령열은 시험 프로그램의 참조 검사기와 판정과 메시지를 비교한다), 4 GiB 위의 버퍼, 출력 버퍼의 쓰기 펜스(dma-buf), 장치 오류와 타임아웃 뒤 복구, perfmon, runtime PM, 모듈 재적재 | 게스트 |
-| V6 | 끝-끝: kn1-evb를 부팅해 MNIST CNN과 ResNet-8을 돌리고, V2와 비교하고, 카운터를 보고 | QEMU |
+| V6 | 끝-끝: kn1-evb를 부팅해 합성곱 모델, MNIST CNN, ResNet-8을 돌리고, V2와 비교하고, 카운터를 보고 | QEMU |
 
 CI(D42, GitHub Actions): push마다 V2~V4와 런타임의 호스트 시험(`cargo
 test`: 모델 파싱과 검사, 시험 공유 객체로 CPU 코드 올리기와 단계 실행, UAPI
@@ -1013,7 +1014,7 @@ Buildroot 자체 소스를 저장하지 않았다는 것 밖의 경고를 내지
 본다(12.4절).
 빌드와 시험의 진입점은 저장소 맨 위 `Makefile`의 대상이고(`make`, `make test`,
 `make check`, `make check-style`, `make check-licenses`), CI도 같은 대상을
-부른다.
+부른다(push CI의 check-package와 DT 스키마 검사는 스크립트를 직접 부른다).
 
 ---
 
@@ -1044,7 +1045,7 @@ qemu-npu-soc/
 |----------|------|-----------|
 | QEMU | v11.1.3 | `br2-external`의 Buildroot 호스트 패키지 |
 | Linux | v7.3.1(7.3.y) | Buildroot |
-| TF-A | v2.15.0 | Buildroot(`BR2_TARGET_ARM_TRUSTED_FIRMWARE_CUSTOM_GIT` 또는 tarball) |
+| TF-A | v2.15.0 | Buildroot(`BR2_TARGET_ARM_TRUSTED_FIRMWARE_CUSTOM_VERSION`, git.trustedfirmware.org의 태그) |
 | U-Boot | v2026.10 | Buildroot |
 | Buildroot | 2026.08.1 | 서브모듈 |
 | LLVM/MLIR, clang, lld | 23.x(D17) | 호스트의 apt.llvm.org 패키지 |
@@ -1074,7 +1075,7 @@ ResNet-8 모델이 커밋한 벡터(10절)와 달라 V3가 실패하므로, 로�
 
 연결 패치(glue patch)는 되도록 작게, 등록에 필요한 것만 둔다.
 
-- QEMU: SoC 장치, 머신, NPU의 meson과 Kconfig 항목
+- QEMU: SoC 장치, 머신, NPU의 meson, Kconfig, trace-events 항목
 - U-Boot: 보드 Kconfig 항목
 - TF-A: 없음. 플랫폼 디렉터리를 트리로 복사한다(D34).
 - 리눅스(필요할 때만): `vendor-prefixes.yaml`의 `kiwon` 항목

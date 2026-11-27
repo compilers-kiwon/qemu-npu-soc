@@ -62,8 +62,9 @@ void bl2_platform_setup(void)
 	/*
 	 * This is where a TrustZone address space controller and other
 	 * security related peripherals would be configured. The kn1 device
-	 * tree is static and already describes PSCI, so BL2 does not edit
-	 * the DTB that the loader placed at the start of DRAM.
+	 * tree is static and already describes PSCI, so BL2 edits no device
+	 * tree: U-Boot has its own (OF_SEPARATE) and loads the kernel's from
+	 * the boot disk.
 	 */
 }
 

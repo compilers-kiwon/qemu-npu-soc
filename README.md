@@ -94,8 +94,8 @@ unzip, rsync, file, bc, findutils, awk, wget. Debian 계열에서는
 sudo apt-get install build-essential bc bzip2 cpio file git patch perl rsync unzip wget
 ```
 
-`buildroot/utils/check-package`를 돌리려면 `python3-magic`과
-`python3-flake8`도 필요하다. 컴파일러 시험(`make check-compiler`)과 라이선스
+`buildroot/utils/check-package`를 돌리려면 `python3-magic`, `python3-flake8`,
+`shellcheck`도 필요하다. 컴파일러 시험(`make check-compiler`)과 라이선스
 검사(`make check-licenses`)는 venv를 만드므로 `python3-venv`도 필요하다.
 
 ## 빌드
@@ -320,7 +320,9 @@ make check-compiler
 `MLIR_DIR=`로 준다.
 
 - V4: `compiler/test/`의 lit 시험. 방언 검증기, 패스마다의 결과와 오류,
-  명세 12절 예시와 워드 단위로 같은 명령열, 실제 lcc 출력 하나를 다룬다.
+  명세 12절 예시와 워드 단위로 같은 명령열, 그리고 고정한 lcc 릴리스의 실제
+  출력을 거치는 시험 셋(합성곱 층 하나, M2·M3의 pragma 전부, SRAM 배치 규칙
+  선택)을 다룬다.
 - V2, V3: `tests/compiler/`. 시험 모델 `models/conv/conv.tflite`(14x14x8
   입력, 3x3 합성곱, 출력 16채널)를 두 반올림 방식으로 다룬다. TensorFlow
   Lite Micro 인터프리터가 정답값을 만들고, 생성기가 쓴 C를 gcc로 돌린
@@ -361,16 +363,16 @@ CI와 컴파일러에는 TensorFlow가 필요 없다.
 # modprobe knpu
 # cd /usr/share/knpu/conv
 # knpu-infer conv-double-4k.knpu input-0.bin --expect expected-double-0.bin
-model=conv-double-4k.knpu format=0.0 sram_size=4096 command_bytes=520 model_ops=16
+model=conv-double-4k.knpu format=0.0 sram_size=4096 command_bytes=520 model_ops=16 cpu_steps=0
 input_shape=1x14x14x8 input_scale=0.003921531 input_zero_point=-128 output_shape=1x14x14x16 output_scale=0.0072401874 output_zero_point=-128
 device=/dev/accel/accel0 npu=0.0 device_sram_size=65536
 macs=225792 dma_rd_bytes=3808 dma_wr_bytes=3136 ops=16
 match=yes
 ```
 
-호스트 시험(모델 파싱과 검사, UAPI 정의와 C 헤더 대조, 명령줄)은 Rust
-1.97.1로 돈다. 전체 빌드를 했으면 Buildroot가 만든 cargo(`output/host/bin`)를
-쓰고, 아니면 시스템의 cargo를 쓴다.
+호스트 시험(모델 파싱과 검사, 시험 공유 객체로 CPU 코드 올리기와 단계 실행,
+UAPI 정의와 C 헤더 대조, 명령줄)은 Rust 1.97.1로 돈다. 전체 빌드를 했으면
+Buildroot가 만든 cargo(`output/host/bin`)를 쓰고, 아니면 시스템의 cargo를 쓴다.
 
 ```bash
 make check-runtime

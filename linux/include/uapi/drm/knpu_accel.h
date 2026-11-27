@@ -155,9 +155,9 @@ struct drm_knpu_bo_mmap_offset {
  *
  * Waits until every submitted job that reads or writes the buffer has
  * finished. Returns 0 on success, -ETIME when @timeout_ns passed first, and
- * -EIO when the last job that used the buffer failed: the device stopped
- * with an error or the job timed out. The kernel log holds the error code
- * and the offset of the failing command.
+ * -EIO when, for some submitter, the newest job that used the buffer
+ * failed: the device stopped with an error or the job timed out. The kernel
+ * log holds the error code and the offset of the failing command.
  */
 struct drm_knpu_bo_wait {
 	/** @handle: Handle of the object to wait for. */
