@@ -23,13 +23,17 @@ endef
 UBOOT_POST_PATCH_HOOKS += UBOOT_KN1_ADD_BOARD
 
 # legal-info saves the tarball and the applied patches but not the files
-# copied in above; they go next to them, at their paths in the U-Boot tree
-# (docs/design.md 12.4)
+# copied in above or the device trees Buildroot copies in from
+# BR2_TARGET_UBOOT_CUSTOM_DTS_PATH; they go next to them, at their paths in
+# the U-Boot tree (docs/design.md 12.4)
 define UBOOT_KN1_SAVE_BOARD
 	mkdir -p $(UBOOT_REDIST_SOURCES_DIR)/board \
-		$(UBOOT_REDIST_SOURCES_DIR)/configs
+		$(UBOOT_REDIST_SOURCES_DIR)/configs \
+		$(UBOOT_REDIST_SOURCES_DIR)/arch/$(UBOOT_ARCH)/dts
 	cp -r $(UBOOT_KN1_SRC_DIR)/board/kiwon $(UBOOT_REDIST_SOURCES_DIR)/board/
 	cp $(UBOOT_KN1_SRC_DIR)/configs/kn1-evb_defconfig \
 		$(UBOOT_REDIST_SOURCES_DIR)/configs/
+	cp $(UBOOT_CUSTOM_DTS_PATH) \
+		$(UBOOT_REDIST_SOURCES_DIR)/arch/$(UBOOT_ARCH)/dts/
 endef
 UBOOT_POST_LEGAL_INFO_HOOKS += UBOOT_KN1_SAVE_BOARD

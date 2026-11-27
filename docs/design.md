@@ -1121,9 +1121,10 @@ Buildroot 외부 패키지는 `_LICENSE`와 함께 `_LICENSE_FILES`로 라이선
 훅이 그 패키지가 쓰는 전문을 패키지 빌드 디렉터리로 복사하고, 전문의 해시를
 패키지의 `.hash`에 둔다. 버전을 고정한 리눅스(커널, 헤더)와 TF-A의 해시
 파일에도 라이선스 파일의 해시를 둔다. `legal-info`는 tarball과 적용한 패치를
-저장하지만 훅이 복사해 넣는 파일(U-Boot 보드와 defconfig, TF-A 플랫폼, QEMU의
-kn1 소스와 공유 코어, `knpu_cmd.h`)은 저장하지 않으므로, legal-info 뒤 훅이 그
-파일을 저장된 소스 옆에 트리 경로 그대로 둔다. 파일마다의 라이선스가 위 표와
+저장하지만 훅이나 Buildroot가 복사해 넣는 파일(U-Boot 보드와 defconfig, TF-A
+플랫폼, QEMU의 kn1 소스와 공유 코어, `knpu_cmd.h`, U-Boot와 리눅스가 쓰는
+`linux/dts/`의 DTS)은 저장하지 않으므로, legal-info 뒤 훅이 그 파일을 저장된
+소스 옆에 트리 경로 그대로 둔다. 파일마다의 라이선스가 위 표와
 맞는지는 push CI가 검사한다(11절).
 
 ---

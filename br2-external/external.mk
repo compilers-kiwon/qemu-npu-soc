@@ -3,3 +3,4 @@
 
 include $(sort $(wildcard $(BR2_EXTERNAL_KN1_PATH)/package/*/*.mk))
 include $(sort $(wildcard $(BR2_EXTERNAL_KN1_PATH)/boot/*/*.mk))
+include $(sort $(wildcard $(BR2_EXTERNAL_KN1_PATH)/linux/*.mk))
